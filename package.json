@@ -1,5 +1,5 @@
 {
-  "name": "ro-renewal-pro",
+  "name": "amc-desk",
   "version": "1.0.0",
   "private": true,
   "scripts": {
@@ -9,6 +9,7 @@
     "lint": "eslint app components lib"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.109.0",
     "lucide-react": "^0.468.0",
     "next": "^16.4.6",
     "react": "^19.3.1",

@@ -1,150 +1,278 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
-import Link from 'next/link'
+import { useEffect, useState, type FormEvent } from 'react'
 import {
-  Activity, ArrowUpRight, BarChart3, Bell, CalendarDays, Check, ChevronDown, ChevronRight,
-  CircleHelp, ClipboardList, CreditCard, Droplets, Filter, Gauge, LayoutDashboard, LogOut, Menu, MessageCircle,
-  Moon, Package, Plus, Search, Settings, ShieldCheck, ShoppingBag, Sun, Users, Wrench, X,
+  Activity, BarChart3, CalendarDays, ChevronDown, ClipboardList, CreditCard, Droplets, Gauge, LayoutDashboard,
+  LogOut, Menu, MessageCircle, Package, Settings, ShieldCheck, ShoppingBag, Users, Wrench, X,
 } from 'lucide-react'
 import Workspace, { type ViewKey } from '@/components/workspace'
-import { customers, tenants as initialTenants, type Tenant } from '@/lib/data'
+import { getSupabaseClient } from '@/lib/supabase'
 
-const navigation: { name: ViewKey; icon: typeof LayoutDashboard; badge?: string; section?: string }[] = [
-  { name: 'Dashboard', icon: LayoutDashboard, section: 'WORKSPACE' },
+type Tenant = {
+  id: string
+  name: string
+  slug: string
+  city: string | null
+  gstin: string | null
+  upi_id: string | null
+  custom_domain: string | null
+}
+
+type MembershipRow = { role: string; tenant: Tenant }
+const navigation: { name: ViewKey; icon: typeof LayoutDashboard }[] = [
+  { name: 'Dashboard', icon: LayoutDashboard },
   { name: 'WhatsApp Inbox', icon: MessageCircle },
   { name: 'WhatsApp Automation', icon: Activity },
   { name: 'SERVICE STATUS', icon: Gauge },
-  { name: 'Customers 360', icon: Users, section: 'CUSTOMER MANAGEMENT' },
+  { name: 'Customers 360', icon: Users },
   { name: 'Services & Jobs', icon: ClipboardList },
   { name: 'Service Calendar', icon: CalendarDays },
   { name: 'AMC Management', icon: ShieldCheck },
-  { name: 'Technicians', icon: Wrench, section: 'OPERATIONS' },
+  { name: 'Technicians', icon: Wrench },
   { name: 'Inventory Spares', icon: Package },
-  { name: 'RO Sales & Catalog', icon: ShoppingBag, badge: 'NEW' },
-  { name: 'Invoices & Billing', icon: CreditCard, section: 'GROW YOUR BUSINESS' },
+  { name: 'RO Sales & Catalog', icon: ShoppingBag },
+  { name: 'Invoices & Billing', icon: CreditCard },
   { name: 'Business Reports', icon: BarChart3 },
   { name: 'Business Settings', icon: Settings },
 ]
 
-type Props = { superAdmin?: boolean }
-
-function Badge({ children, tone = 'slate' }: { children: React.ReactNode; tone?: string }) {
-  return <span className={`badge ${tone}`}>{children}</span>
-}
-
-function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><div className="modal"><div className="modal-header"><h3>{title}</h3><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></div>{children}</div></div>
-}
-
-export default function AppShell({ superAdmin = false }: Props) {
+export default function AppShell() {
+  const supabase = getSupabaseClient()
+  const [sessionReady, setSessionReady] = useState(!supabase)
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [tenants, setTenants] = useState<Tenant[]>([])
+  const [tenantRoles, setTenantRoles] = useState<Record<string, string>>({})
+  const [tenantId, setTenantId] = useState('')
+  const [tenantLoading, setTenantLoading] = useState(true)
+  const [tenantError, setTenantError] = useState('')
   const [page, setPage] = useState<ViewKey>('Dashboard')
-  const [tenant, setTenant] = useState<Tenant>(initialTenants[0])
-  const [tenants, setTenants] = useState<Tenant[]>(initialTenants)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [theme, setTheme] = useState<'light' | 'dark'>('light')
-  const [query, setQuery] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [dialog, setDialog] = useState<'customer' | 'booking' | null>(null)
   const [notice, setNotice] = useState('')
 
   useEffect(() => {
-    const savedTheme = window.localStorage.getItem('ro-renewal-theme')
-    if (savedTheme === 'dark' || savedTheme === 'light') {
-      // Restore the user's appearance preference after hydration.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setTheme(savedTheme)
-    }
-  }, [])
+    if (!supabase) return
+
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (error) setNotice(error.message)
+      setUserEmail(data.session?.user.email ?? null)
+      setSessionReady(true)
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'TOKEN_REFRESHED') return
+      setUserEmail(session?.user.email ?? null)
+      setTenants([])
+      setTenantRoles({})
+      setTenantId('')
+      setTenantError('')
+      setTenantLoading(true)
+    })
+
+    return () => subscription.unsubscribe()
+  }, [supabase])
 
   useEffect(() => {
-    let tenantList = initialTenants
-    const savedTenants = window.localStorage.getItem('ro-renewal-tenants')
-    if (savedTenants) {
-      try {
-        const parsed = JSON.parse(savedTenants) as Tenant[]
-        if (Array.isArray(parsed) && parsed.length) {
-          tenantList = parsed
-          // Load persisted tenant data after hydration to keep server and client markup aligned.
-          // eslint-disable-next-line react-hooks/set-state-in-effect
-          setTenants(parsed)
+    if (!supabase || !userEmail) return
+    let active = true
+    supabase
+      .from('tenant_memberships')
+      .select('role, tenant:tenants!inner(id, name, slug, city, gstin, upi_id, custom_domain)')
+      .order('created_at', { ascending: true })
+      .then(({ data, error }) => {
+        if (!active) return
+        if (error) {
+          setTenantError(error.message)
+        } else {
+          const memberships = (data ?? []) as unknown as MembershipRow[]
+          const available = memberships.map((membership) => membership.tenant)
+          const roles = Object.fromEntries(memberships.map((membership) => [membership.tenant.id, membership.role]))
+          setTenants(available)
+          setTenantRoles(roles)
+          setTenantId(available[0]?.id ?? '')
         }
-      } catch {
-        window.localStorage.removeItem('ro-renewal-tenants')
-      }
-    }
-    const host = window.location.hostname.toLowerCase()
-    const slug = window.location.pathname.split('/').filter(Boolean)[0]
-    const match = tenantList.find((item) => item.active && (item.customDomain.toLowerCase() === host || item.slug === slug))
-    if (match) setTenant(match)
-  }, [])
+        setTenantLoading(false)
+      })
 
-  useEffect(() => {
-    if (!notice) return
-    const timer = window.setTimeout(() => setNotice(''), 2800)
-    return () => window.clearTimeout(timer)
-  }, [notice])
+    return () => { active = false }
+  }, [supabase, userEmail])
 
-  const searchResults = useMemo(() => query.trim().length < 2 ? [] : customers.filter((customer) =>
-    `${customer.name} ${customer.phone} ${customer.serial}`.toLowerCase().includes(query.toLowerCase()),
-  ).slice(0, 5), [query])
+  const selectedTenant = tenants.find((tenant) => tenant.id === tenantId)
 
-  const toast = (message: string) => setNotice(message)
-  const toggleTheme = () => setTheme((current) => {
-    const next = current === 'light' ? 'dark' : 'light'
-    window.localStorage.setItem('ro-renewal-theme', next)
-    return next
-  })
+  async function signOut() {
+    if (!supabase) return
+    const { error } = await supabase.auth.signOut()
+    if (error) setNotice(error.message)
+  }
 
-  if (superAdmin) return <div data-theme={theme}><button className="theme-toggle admin-theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`} title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}>{theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}</button><SuperAdmin tenants={tenants} setTenants={(next) => {
-    setTenants(next)
-    window.localStorage.setItem('ro-renewal-tenants', JSON.stringify(next))
-  }} /></div>
+  if (!supabase) {
+    return <SetupNotice />
+  }
 
-  return <div className="app-shell" data-theme={theme}>
+  if (!sessionReady) {
+    return <div className="auth-screen"><div className="panel auth-card">Connecting to Supabase…</div></div>
+  }
+
+  if (!userEmail) {
+    return <AuthScreen onAuthenticated={(email) => setUserEmail(email)} />
+  }
+
+  if (tenantLoading) {
+    return <div className="auth-screen"><div className="panel auth-card">Loading your workspace…</div></div>
+  }
+
+  if (tenantError) {
+    return <div className="auth-screen"><div className="panel auth-card"><h1>Workspace unavailable</h1><p>{tenantError}</p><button className="button" onClick={signOut}>Sign out</button></div></div>
+  }
+
+  if (!selectedTenant) {
+    return <CreateWorkspace onCreated={(tenant) => { setTenants([tenant]); setTenantRoles({ [tenant.id]: 'owner' }); setTenantId(tenant.id) }} onSignOut={signOut} />
+  }
+
+  const toast = (message: string) => {
+    setNotice(message)
+    window.setTimeout(() => setNotice(''), 3500)
+  }
+
+  return <div className="app-shell" data-theme="light">
     {sidebarOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar ${sidebarOpen ? 'mobile-open' : ''}`}>
-      <div className="brand-row"><div className="brand-symbol"><Droplets size={18} fill="currentColor" /></div><div className="brand-name">RO Renewal <span>PRO</span></div><button className="mobile-close icon-button" onClick={() => setSidebarOpen(false)}><X size={17} /></button></div>
-      <div className="brand-tagline">Never miss a service.<br />Never lose a customer.</div>
-      <div className="workspace-picker"><div className="workspace-logo">SR</div><div className="workspace-copy"><strong>{tenant.name}</strong><span>Owner: {tenant.owner}</span></div><span className="online-dot" /><button className="workspace-menu" onClick={() => setTenant(tenants[(tenants.findIndex((item) => item.id === tenant.id) + 1) % tenants.length])} aria-label="Switch workspace"><ChevronDown size={14} /></button><div className="workspace-switch-hint">Switch workspace</div></div>
-      <nav className="sidebar-nav">{navigation.map((item, index) => {
-        const previousSection = navigation[index - 1]?.section
-        const Icon = item.icon
-        return <div key={item.name}>{item.section && <div className="nav-section">{item.section}</div>}<button className={`nav-item ${page === item.name ? 'active' : ''}`} onClick={() => { setPage(item.name); setSidebarOpen(false) }}><Icon size={17} strokeWidth={1.8} /><span>{item.name}</span>{item.badge && <i className="new-badge">{item.badge}</i>}{item.name === 'WhatsApp Inbox' && <span className="nav-count">4</span>}</button>{previousSection && !item.section && null}</div>
-      })}</nav>
-      <div className="sidebar-bottom"><div className="help-card"><div className="help-icon"><CircleHelp size={16} /></div><span><strong>Need a hand?</strong><small>Visit our help center</small></span><ChevronRight size={14} /></div><button className="logout-sidebar" onClick={() => toast('You are safely logged out of the demo')}><LogOut size={16} /> Log Out</button><div className="sidebar-footer"><span>RO Renewal PRO</span><span>v1.0.0 · Demo workspace</span></div></div>
+      <div className="brand-row"><div className="brand-symbol"><Droplets size={18} /></div><div className="brand-name">AMC Desk</div><button className="mobile-close icon-button" onClick={() => setSidebarOpen(false)}><X size={17} /></button></div>
+      <div className="brand-tagline">Service operations<br />for your business.</div>
+      <label className="workspace-picker">
+        <div className="workspace-logo">{selectedTenant.name.slice(0, 2).toUpperCase()}</div>
+        <span className="workspace-copy"><strong>{selectedTenant.name}</strong><small>{selectedTenant.city || 'Workspace'}</small></span>
+        <ChevronDown size={14} />
+        <select aria-label="Switch workspace" value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
+          {tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}
+        </select>
+      </label>
+      <nav className="sidebar-nav">{navigation.map(({ name, icon: Icon }) => <button key={name} className={`nav-item ${page === name ? 'active' : ''}`} onClick={() => { setPage(name); setSidebarOpen(false) }}><Icon size={17} /><span>{name}</span></button>)}</nav>
+      <div className="sidebar-bottom">
+        <div className="sidebar-footer"><span>{userEmail}</span></div>
+        <button className="logout-sidebar" onClick={signOut}><LogOut size={16} /> Sign out</button>
+      </div>
     </aside>
     <main className="main-shell">
-      <header className="topbar"><div className="topbar-left"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>Workspace</span><ChevronRight size={13} /><strong>{page}</strong></div></div><div className="topbar-tools"><div className="global-search"><Search size={16} /><input value={query} onChange={(event) => { setQuery(event.target.value); setSearchOpen(true) }} onFocus={() => setSearchOpen(true)} onKeyDown={(event) => { if (event.key === 'Escape') setSearchOpen(false) }} placeholder="Search phone, customer..." /><kbd>⌘ K</kbd>{searchOpen && query.length >= 2 && <div className="search-results">{searchResults.length ? searchResults.map((customer) => <button key={customer.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { setPage('Customers 360'); setSearchOpen(false); setQuery(''); toast(`Opened ${customer.name}'s profile`) }}><span className="search-avatar">{customer.avatar}</span><span><strong>{customer.name}</strong><small>{customer.phone} · {customer.serial}</small></span><ArrowUpRight size={14} /></button>) : <div className="search-empty">No customers found</div>}</div>}</div><div className="sync-pill"><span className="online-dot" /> <span>Cloud Synced</span></div><button className="button header-book" aria-label="Book Service" onClick={() => setDialog('booking')}><CalendarDays size={14} /> Book Service</button><button className="button primary header-add" onClick={() => setDialog('customer')}><Plus size={15} /> Add Customer</button><button className="theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`} title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}>{theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}</button><button className="notification-button" aria-label="Notifications" onClick={() => toast('You are all caught up')}><Bell size={17} /><i /></button><div className="profile-chip"><span className="profile-avatar">A</span><span>Owner</span><ChevronDown size={13} /></div><button className="header-logout" onClick={() => toast('You are safely logged out of the demo')} aria-label="Log out"><LogOut size={16} /></button></div></header>
-      <div className="workspace"><Workspace page={page} tenant={tenant} onNavigate={setPage} onToast={toast} onBook={() => setDialog('booking')} onSelectCustomer={() => {}} /></div>
-      <footer className="app-footer"><span>© {new Intl.DateTimeFormat('en', { year: 'numeric', timeZone: 'Asia/Kolkata' }).format(new Date())} RO Renewal PRO</span><span><i className="online-dot" /> All systems operational</span><a href="/super-admin">Platform admin <ArrowUpRight size={12} /></a></footer>
+      <header className="topbar">
+        <div className="topbar-left"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>{selectedTenant.name}</span><strong>{page}</strong></div></div>
+        <div className="topbar-tools"><span className="sync-pill">Supabase connected</span><button className="button header-book" onClick={() => setPage('Services & Jobs')}><CalendarDays size={14} /> Services</button><button className="button primary header-add" onClick={() => setPage('Customers 360')}><Users size={15} /> Customers</button><button className="header-logout" onClick={signOut} aria-label="Sign out"><LogOut size={16} /></button></div>
+      </header>
+      <div className="workspace"><Workspace key={`${selectedTenant.id}-${page}`} page={page} tenantId={selectedTenant.id} role={tenantRoles[selectedTenant.id]} tenant={selectedTenant} onToast={toast} /></div>
+      <footer className="app-footer"><span>AMC Desk · {selectedTenant.name}</span><span>{userEmail}</span></footer>
     </main>
-    {dialog === 'customer' && <Modal title="Add a customer" onClose={() => setDialog(null)}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); setDialog(null); toast('Customer added to your workspace') }}><p className="modal-copy">Create a customer profile to start tracking their RO and service history.</p><div className="form-grid"><label className="field-label">CUSTOMER NAME<input required placeholder="e.g. Ananya Reddy" /></label><label className="field-label">PHONE NUMBER<input required type="tel" placeholder="+91 98XXX XXXXX" /></label><label className="field-label">AREA / LOCALITY<input placeholder="e.g. Madhapur" /></label><label className="field-label">PURIFIER MODEL<input placeholder="e.g. Kent Grand Plus" /></label></div><div className="modal-actions"><button type="button" className="button" onClick={() => setDialog(null)}>Cancel</button><button className="button primary"><Plus size={14} /> Add customer</button></div></form></Modal>}
-    {dialog === 'booking' && <Modal title="Book a service" onClose={() => setDialog(null)}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); setDialog(null); toast('Service visit scheduled successfully') }}><p className="modal-copy">Schedule a doorstep visit for a customer.</p><div className="form-grid"><label className="field-label">CUSTOMER<select required defaultValue=""><option value="" disabled>Select customer</option>{customers.map((customer) => <option key={customer.id}>{customer.name} · {customer.phone}</option>)}</select></label><label className="field-label">SERVICE TYPE<select><option>Routine Filter Change</option><option>AMC Visit</option><option>Breakdown Repair</option><option>Installation</option></select></label><label className="field-label">DATE<input required type="date" defaultValue="2025-11-17" /></label><label className="field-label">PREFERRED TIME<select><option>09:30 AM</option><option>11:30 AM</option><option>02:00 PM</option><option>04:00 PM</option></select></label><label className="field-label span-two">ASSIGN TECHNICIAN<select>{['Ramesh Kumar', 'Sajid Ali', 'Naveen Reddy', 'Mahesh Babu', 'Imran Khan'].map((name) => <option key={name}>{name}</option>)}</select></label></div><div className="modal-actions"><button type="button" className="button" onClick={() => setDialog(null)}>Cancel</button><button className="button primary"><CalendarDays size={14} /> Schedule visit</button></div></form></Modal>}
-    {notice && <div className="toast"><span><Check size={14} /></span>{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
+    {notice && <div className="toast">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
   </div>
 }
 
-function SuperAdmin({ tenants, setTenants }: { tenants: Tenant[]; setTenants: (tenants: Tenant[]) => void }) {
-  const [form, setForm] = useState(false)
-  const [editing, setEditing] = useState<Tenant | null>(null)
-  const [draft, setDraft] = useState({ name: '', owner: '', city: '', customDomain: '', slug: '', gstin: '', upi: '' })
-  const [notice, setNotice] = useState('')
-  const save = (event: React.FormEvent) => {
+function SetupNotice() {
+  return <div className="auth-screen"><div className="panel auth-card"><div className="brand-symbol"><Droplets size={18} /></div><h1>Connect Supabase</h1><p>Add your project URL and publishable anon key to <code>.env.local</code>, then restart the app.</p><pre>NEXT_PUBLIC_SUPABASE_URL=…{'\n'}NEXT_PUBLIC_SUPABASE_ANON_KEY=…</pre></div></div>
+}
+
+function AuthScreen({ onAuthenticated }: { onAuthenticated: (email: string) => void }) {
+  const supabase = getSupabaseClient()
+  const [mode, setMode] = useState<'sign-in' | 'sign-up'>('sign-in')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [business, setBusiness] = useState('')
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const next = editing
-      ? tenants.map((tenant) => tenant.id === editing.id ? { ...tenant, ...draft } : tenant)
-      : [...tenants, { ...draft, id: `dealer-${Date.now()}`, active: true }]
-    setTenants(next)
-    setForm(false)
-    setEditing(null)
-    setNotice(editing ? 'Dealer workspace updated' : 'New dealer workspace created')
-    window.setTimeout(() => setNotice(''), 2500)
+    if (!supabase) return
+    setBusy(true)
+    setError('')
+    setMessage('')
+    const result = mode === 'sign-in'
+      ? await supabase.auth.signInWithPassword({ email, password })
+      : await supabase.auth.signUp({ email, password, options: { data: { business_name: business } } })
+    setBusy(false)
+    if (result.error) {
+      setError(result.error.message)
+    } else if (result.data.session) {
+      onAuthenticated(result.data.session.user.email ?? email)
+    } else {
+      setMessage('Check your email to confirm your account, then sign in.')
+    }
   }
-  const startEdit = (tenant: Tenant) => {
-    setEditing(tenant)
-    setDraft({ name: tenant.name, owner: tenant.owner, city: tenant.city, customDomain: tenant.customDomain, slug: tenant.slug, gstin: tenant.gstin, upi: tenant.upi })
-    setForm(true)
+
+  return <div className="auth-screen"><form className="panel auth-card" onSubmit={submit}>
+    <div className="brand-symbol"><Droplets size={18} /></div><div className="eyebrow">AMC DESK</div>
+    <h1>{mode === 'sign-in' ? 'Sign in to your workspace' : 'Create your workspace'}</h1>
+    <p>Use your account to securely access your service data.</p>
+    {mode === 'sign-up' && <label className="field-label">BUSINESS NAME<input required value={business} onChange={(event) => setBusiness(event.target.value)} autoComplete="organization" /></label>}
+    <label className="field-label">EMAIL<input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+    <label className="field-label">PASSWORD<input required type="password" minLength={8} autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+    {error && <p className="form-error" role="alert">{error}</p>}{message && <p role="status">{message}</p>}
+    <button className="button primary full-button" disabled={busy}>{busy ? 'Please wait…' : mode === 'sign-in' ? 'Sign in' : 'Create account'}</button>
+    <button type="button" className="text-button auth-switch" onClick={() => { setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in'); setError(''); setMessage('') }}>{mode === 'sign-in' ? 'New to AMC Desk? Create an account' : 'Already registered? Sign in'}</button>
+  </form></div>
+}
+
+function CreateWorkspace({ onCreated, onSignOut }: { onCreated: (tenant: Tenant) => void; onSignOut: () => void }) {
+  const supabase = getSupabaseClient()
+  const [name, setName] = useState('')
+  const [city, setCity] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase) return
+    setBusy(true)
+    setError('')
+    const sessionResult = await supabase.auth.getSession()
+    if (!sessionResult.data.session) {
+      setBusy(false)
+      setError('Please sign in again. Your Supabase session is missing.')
+      return
+    }
+    const userResult = await supabase.auth.getUser()
+    const user = userResult.data.user
+    if (!user) {
+      setBusy(false)
+      setError('Authentication is required')
+      return
+    }
+
+    const baseSlug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'workspace'
+    const tenantId = crypto.randomUUID()
+    const slug = `${baseSlug}-${tenantId.slice(0, 8)}`
+    const { data: tenant, error: resultError } = await supabase
+      .from('tenants')
+      .insert({
+        id: tenantId,
+        name: name.trim(),
+        owner_name: user.email?.split('@')[0] || 'Owner',
+        city: city.trim(),
+        slug,
+      })
+      .select('id, name, slug, city, gstin, upi_id, custom_domain')
+      .single()
+
+    if (resultError || !tenant) {
+      setBusy(false)
+      setError(
+        resultError
+          ? `${resultError.message}${resultError.code ? ` [${resultError.code}]` : ''}`
+          : 'Could not create workspace',
+      )
+      return
+    }
+
+    const { error: membershipError } = await supabase
+      .from('tenant_memberships')
+      .insert({ tenant_id: tenantId, user_id: user.id, role: 'owner' })
+
+    setBusy(false)
+    if (membershipError) {
+      setError(
+        `${membershipError.message}${membershipError.code ? ` [${membershipError.code}]` : ''}`,
+      )
+      return
+    }
+    onCreated(tenant)
   }
-  return <div className="admin-shell"><aside className="admin-sidebar"><Link className="brand-row" href="/"><div className="brand-symbol"><Droplets size={18} fill="currentColor" /></div><div className="brand-name">RO Renewal <span>PRO</span></div></Link><div className="admin-label">PLATFORM</div><Link className="admin-nav active" href="/super-admin"><LayoutDashboard size={16} /> Dealer workspaces</Link><Link className="admin-nav" href="/"><Gauge size={16} /> Back to product</Link><div className="admin-sidebar-bottom"><ShieldCheck size={17} /> Super administrator</div></aside><main className="admin-main"><header className="admin-topbar"><div><span className="eyebrow">PLATFORM CONTROL CENTER</span><h1>Dealer workspaces</h1></div><div className="profile-chip"><span className="profile-avatar">S</span> Super Admin</div></header><div className="admin-content"><div className="admin-intro"><div><h2>Manage your tenants</h2><p>Provision branded RO Renewal workspaces and connect each dealer&apos;s custom domain.</p></div><button className="button primary" onClick={() => { setEditing(null); setDraft({ name: '', owner: '', city: '', customDomain: '', slug: '', gstin: '', upi: '' }); setForm(true) }}><Plus size={15} /> Add dealer</button></div><div className="admin-kpis"><div className="panel"><span>ACTIVE DEALERS</span><strong>{tenants.filter((tenant) => tenant.active).length}</strong><small>of {tenants.length} total</small></div><div className="panel"><span>CUSTOM DOMAINS</span><strong>{tenants.filter((tenant) => tenant.customDomain).length}</strong><small>Domains connected</small></div><div className="panel"><span>PLATFORM LIMIT</span><strong>10+</strong><small>Dealer workspaces</small></div></div><section className="panel admin-table-panel"><div className="panel-title-row"><div><h3>All workspaces</h3><p>Changes apply to this local demo and persist in your browser.</p></div><button className="button"><Filter size={14} /> All status</button></div><div className="table-scroll"><table><thead><tr><th>BUSINESS</th><th>OWNER &amp; CITY</th><th>CUSTOM DOMAIN</th><th>URL PATH</th><th>STATUS</th><th></th></tr></thead><tbody>{tenants.map((tenant) => <tr key={tenant.id}><td><div className="customer-cell"><div className="workspace-logo">{tenant.name.slice(0, 2)}</div><span><strong>{tenant.name}</strong><small>GSTIN · {tenant.gstin}</small></span></div></td><td><strong>{tenant.owner}</strong><small>{tenant.city}</small></td><td><span className="domain-label">{tenant.customDomain}</span></td><td className="mono">/{tenant.slug}</td><td><button className={`toggle ${tenant.active ? 'on' : ''}`} aria-label="Toggle tenant active status" onClick={() => setTenants(tenants.map((item) => item.id === tenant.id ? { ...item, active: !item.active } : item))}><span /></button> <Badge tone={tenant.active ? 'green' : 'slate'}>{tenant.active ? 'Active' : 'Inactive'}</Badge></td><td><button className="text-button" onClick={() => startEdit(tenant)}>Edit <ArrowUpRight size={13} /></button></td></tr>)}</tbody></table></div></section><div className="admin-footnote"><ShieldCheck size={15} /> Multi-tenant routing is configured with custom domain and URL slug detection. Supabase integration can be enabled when ready.</div></div></main>{form && <Modal title={editing ? 'Edit dealer workspace' : 'Add dealer workspace'} onClose={() => setForm(false)}><form className="modal-form" onSubmit={save}><p className="modal-copy">Set up this dealer&apos;s branded workspace and billing identity.</p><div className="form-grid"><label className="field-label">BUSINESS NAME<input required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Aqua Care Services" /></label><label className="field-label">OWNER NAME<input required value={draft.owner} onChange={(e) => setDraft({ ...draft, owner: e.target.value })} placeholder="Dealer owner" /></label><label className="field-label">CITY<input required value={draft.city} onChange={(e) => setDraft({ ...draft, city: e.target.value })} placeholder="Hyderabad" /></label><label className="field-label">CUSTOM DOMAIN<input value={draft.customDomain} onChange={(e) => setDraft({ ...draft, customDomain: e.target.value })} placeholder="dealer.in" /></label><label className="field-label">URL PATH SLUG<input required value={draft.slug} onChange={(e) => setDraft({ ...draft, slug: e.target.value.toLowerCase().replaceAll(' ', '-') })} placeholder="dealer-name" /></label><label className="field-label">GSTIN<input value={draft.gstin} onChange={(e) => setDraft({ ...draft, gstin: e.target.value.toUpperCase() })} placeholder="GST registration number" /></label><label className="field-label span-two">UPI ID<input value={draft.upi} onChange={(e) => setDraft({ ...draft, upi: e.target.value })} placeholder="dealer@bank" /></label></div><div className="modal-actions"><button type="button" className="button" onClick={() => setForm(false)}>Cancel</button><button className="button primary"><Check size={14} /> {editing ? 'Save changes' : 'Create workspace'}</button></div></form></Modal>}{notice && <div className="toast"><span><Check size={14} /></span>{notice}</div>}</div>
+
+  return <div className="auth-screen"><form className="panel auth-card" onSubmit={submit}><div className="brand-symbol"><Droplets size={18} /></div><h1>Create a workspace</h1><p>Your account is authenticated, but it does not have a dealer workspace yet.</p><label className="field-label">BUSINESS NAME<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">CITY<input value={city} onChange={(event) => setCity(event.target.value)} /></label>{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary full-button" disabled={busy}>{busy ? 'Creating…' : 'Create workspace'}</button><button type="button" className="text-button auth-switch" onClick={onSignOut}>Sign out</button></form></div>
 }

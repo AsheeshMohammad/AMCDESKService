@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'RO Renewal PRO — Service operations, simplified',
-  description: 'CRM, AMC and field-service management for RO dealers.',
+  title: 'AMC Desk — Service operations',
+  description: 'Customer, AMC and field-service management for service businesses.',
 }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
