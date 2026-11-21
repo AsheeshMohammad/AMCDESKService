@@ -7,7 +7,7 @@ AMC Desk is a multi-tenant service-operations app built with Next.js, Supabase A
 1. Create a Supabase project.
 2. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql). Rerun this file after schema updates; it replaces the workspace RLS policies.
    If workspace creation still reports an RLS violation, run [`supabase/fix-workspace-rls.sql`](./supabase/fix-workspace-rls.sql) separately. It removes every old tenant/membership policy by name and recreates only the authenticated workspace policies.
-3. Copy `.env.example` to `.env.local` and set:
+3. Copy `.env.example` to `.env.local` and set your Supabase project URL and publishable key:
 
    ```dotenv
    NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
@@ -32,7 +32,24 @@ After signing up, create a workspace directly from the app. A user can access ad
 - Direct table operations for workspace creation, membership assignment, customer creation, job booking, status updates, and dashboard totals.
 - Tenant-first indexes and paginated customer/job tables in the UI.
 
-The UI supports creating customers, service jobs, AMC contracts, technicians, stock items, catalog items, invoices, and notification rules, plus service-job status updates. All other lists are tenant-scoped live Supabase views. WhatsApp delivery and payment collection require provider integrations and are intentionally not simulated.
+The UI supports creating customers, service jobs, AMC contracts, technicians, stock items, catalog items, invoices, and notification rules, plus service-job status updates. Reports can graph customer growth, job volume/status, AMC contract end dates, and paid revenue as interactive 2D bar, line, pie, and donut charts, plus 3D columns and trends.
+
+## Meta WhatsApp Cloud API
+
+The WhatsApp inbox sends one-to-one text messages through Meta's Cloud API. Sending is restricted to opted-in customers who messaged the configured business number within the previous 24 hours; bulk sends and template messages are not enabled.
+
+1. In the [Meta for Developers](https://developers.facebook.com/) dashboard, create or select a Business app, add the WhatsApp product, and open **WhatsApp > API Setup**:
+   - Copy the **Temporary access token** to `META_WHATSAPP_ACCESS_TOKEN` for initial testing. For production, create a System User token in Meta Business Settings with the required WhatsApp permissions and use that instead.
+   - Copy the registered sender's **Phone number ID** (not the displayed phone number) to `META_WHATSAPP_PHONE_NUMBER_ID`.
+   - In **App settings > Basic**, copy the **App secret** to `META_WHATSAPP_APP_SECRET`.
+   - Set `META_WHATSAPP_VERIFY_TOKEN` to a random secret string you generate; enter the same string when configuring the webhook in Meta.
+   - Set `META_GRAPH_API_VERSION` to a currently supported Graph API version shown in Meta's documentation.
+   - `META_WHATSAPP_TENANT_ID` is the AMC Desk workspace UUID, not a Meta ID. Find it with `select id, name from public.tenants;`.
+2. In your Supabase project's **Project Settings > API**, copy the **service_role** key to `SUPABASE_SERVICE_ROLE_KEY`. It is only for the server-side webhook; never expose or commit it.
+3. Configure the Meta webhook callback URL as `https://YOUR_APP_HOST/api/whatsapp/webhook`, enter the same value as `META_WHATSAPP_VERIFY_TOKEN`, and subscribe to the `messages` field. Meta's webhook signature is checked against `META_WHATSAPP_APP_SECRET`.
+4. Rerun [`supabase/schema.sql`](./supabase/schema.sql) to add WhatsApp consent and normalized phone-number fields. New customers are not opted in by default. Record consent only after the customer explicitly agrees. Use full international numbers for non-Indian customers; 10-digit Indian numbers are normalized with country code `+91`.
+
+Inbound webhook messages are matched by normalized phone number and stored in the workspace inbox. Unmatched or ambiguous numbers are ignored. The 24-hour reply window is checked on the server immediately before sending. Meta credentials are never sent to the browser.
 
 ## Deployment and scale
 

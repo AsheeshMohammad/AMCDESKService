@@ -1,8 +1,13 @@
 'use client'
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { CalendarDays, ChevronLeft, ChevronRight, Plus, RefreshCw, Search } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import {
+  AlertTriangle, ArrowRight, CalendarDays, ChevronLeft, ChevronRight, CircleDollarSign, MessageCircle, Plus,
+  RefreshCw, Search, ShieldCheck, Users, Wrench,
+} from 'lucide-react'
 import { getSupabaseClient, money } from '@/lib/supabase'
+import ReportChart, { type ReportChartType } from '@/components/report-chart'
+import { toWhatsAppE164 } from '@/lib/whatsapp'
 
 export type ViewKey =
   | 'Dashboard' | 'WhatsApp Inbox' | 'WhatsApp Automation' | 'SERVICE STATUS' | 'Customers 360'
@@ -21,6 +26,7 @@ type Props = {
     custom_domain: string | null
   }
   onToast: (message: string) => void
+  onNavigate: (page: ViewKey) => void
 }
 
 type Row = Record<string, unknown>
@@ -33,10 +39,17 @@ type DashboardSummary = {
   pending_invoice_amount: number
   revenue_this_month: number
 }
+type ReportData = {
+  customers: { created_at: string }[]
+  jobs: { scheduled_at: string; status: string }[]
+  contracts: { ends_on: string }[]
+  invoices: { paid_at: string; total: number }[]
+}
+type ReportMetric = 'customers' | 'jobs' | 'job-status' | 'contracts' | 'revenue'
 
 const pageConfig: Record<ViewKey, { table: string; title: string; description: string; columns: string[] }> = {
   Dashboard: { table: '', title: 'Dashboard', description: 'Live operational summary for this workspace.', columns: [] },
-  'Customers 360': { table: 'customers', title: 'Customers', description: 'Customer records belonging to this workspace.', columns: ['customer_code', 'full_name', 'phone', 'email', 'area', 'city'] },
+  'Customers 360': { table: 'customers', title: 'Customers', description: 'Customer records belonging to this workspace.', columns: ['customer_code', 'full_name', 'phone', 'email', 'area', 'city', 'whatsapp_opt_in'] },
   'Services & Jobs': { table: 'service_jobs', title: 'Services & Jobs', description: 'Scheduled and completed service work.', columns: ['job_number', 'customer', 'service_type', 'technician', 'scheduled_at', 'status'] },
   'SERVICE STATUS': { table: 'service_jobs', title: 'Service status', description: 'Current field-service jobs and their status.', columns: ['job_number', 'customer', 'service_type', 'technician', 'scheduled_at', 'status'] },
   'Service Calendar': { table: 'service_jobs', title: 'Service calendar', description: 'Upcoming scheduled visits.', columns: ['job_number', 'customer', 'service_type', 'technician', 'scheduled_at', 'status'] },
@@ -71,15 +84,17 @@ function valueFor(row: Row, column: string) {
   if (value === null || value === undefined || value === '') return '—'
   if (column === 'amount' || column === 'total' || column === 'mrp' || column === 'dealer_price' || column === 'unit_cost') return money(String(value))
   if (column === 'is_active' || column === 'is_enabled') return value ? 'Active' : 'Inactive'
+  if (column === 'whatsapp_opt_in') return value ? 'Opted in' : 'Not opted in'
   if (column.endsWith('_at') && typeof value === 'string') return new Date(value).toLocaleString()
   return String(value)
 }
 
-export default function Workspace({ page, tenantId, role, tenant, onToast }: Props) {
+export default function Workspace({ page, tenantId, role, tenant, onToast, onNavigate }: Props) {
   const supabase = getSupabaseClient()
   const config = pageConfig[page]
   const [rows, setRows] = useState<Row[]>([])
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
+  const [reportData, setReportData] = useState<ReportData | null>(null)
   const [customerOptions, setCustomerOptions] = useState<Row[]>([])
   const [technicianOptions, setTechnicianOptions] = useState<Row[]>([])
   const [bookingCustomerSearch, setBookingCustomerSearch] = useState('')
@@ -89,6 +104,8 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
   const [pageIndex, setPageIndex] = useState(0)
   const [showCustomerForm, setShowCustomerForm] = useState(false)
   const [showJobForm, setShowJobForm] = useState(false)
+  const [showWhatsAppForm, setShowWhatsAppForm] = useState(false)
+  const [whatsAppError, setWhatsAppError] = useState('')
   const [createRecordPage, setCreateRecordPage] = useState<ViewKey | null>(null)
   const [saving, setSaving] = useState(false)
   const pageSize = 50
@@ -99,7 +116,30 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
     if (!supabase) return
     setLoading(true)
     setError('')
-    if (page === 'Dashboard' || page === 'Business Reports') {
+    if (page === 'Business Reports') {
+      const now = new Date()
+      const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1))
+      const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
+      const startDate = start.toISOString().slice(0, 10)
+      const endDate = end.toISOString().slice(0, 10)
+      const [customersResult, jobsResult, contractsResult, invoicesResult] = await Promise.all([
+        supabase.from('customers').select('created_at').eq('tenant_id', tenantId).gte('created_at', start.toISOString()).lt('created_at', end.toISOString()).order('created_at').limit(1000),
+        supabase.from('service_jobs').select('scheduled_at, status').eq('tenant_id', tenantId).gte('scheduled_at', start.toISOString()).lt('scheduled_at', end.toISOString()).order('scheduled_at').limit(1000),
+        supabase.from('amc_contracts').select('ends_on').eq('tenant_id', tenantId).gte('ends_on', startDate).lt('ends_on', endDate).order('ends_on').limit(1000),
+        supabase.from('invoices').select('paid_at, total').eq('tenant_id', tenantId).eq('status', 'Paid').gte('paid_at', start.toISOString()).lt('paid_at', end.toISOString()).order('paid_at').limit(1000),
+      ])
+      const resultError = [customersResult.error, jobsResult.error, contractsResult.error, invoicesResult.error].find(Boolean)
+      if (resultError) setError(resultError.message)
+      else setReportData({
+        customers: customersResult.data ?? [],
+        jobs: jobsResult.data ?? [],
+        contracts: contractsResult.data ?? [],
+        invoices: (invoicesResult.data ?? []).flatMap((invoice) => invoice.paid_at
+          ? [{ paid_at: invoice.paid_at, total: Number(invoice.total ?? 0) }]
+          : []),
+      })
+      setRows([])
+    } else if (page === 'Dashboard') {
       const now = new Date()
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
@@ -185,13 +225,13 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
   }, [loadData])
 
   useEffect(() => {
-    const needsCustomerOptions = showJobForm || createRecordPage === 'AMC Management' || createRecordPage === 'Invoices & Billing'
+    const needsCustomerOptions = showJobForm || showWhatsAppForm || createRecordPage === 'AMC Management' || createRecordPage === 'Invoices & Billing'
     if (!supabase || !needsCustomerOptions) return
     let active = true
     const safeSearch = bookingCustomerSearch.trim().replace(/[,%()]/g, ' ')
     let customersQuery = supabase
       .from('customers')
-      .select('id, full_name')
+      .select('id, full_name, phone, whatsapp_opt_in')
       .eq('tenant_id', tenantId)
       .order('full_name')
       .limit(50)
@@ -209,7 +249,7 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
     })
 
     return () => { active = false }
-  }, [bookingCustomerSearch, createRecordPage, showJobForm, supabase, tenantId])
+  }, [bookingCustomerSearch, createRecordPage, showJobForm, showWhatsAppForm, supabase, tenantId])
 
   async function addRecord(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -277,15 +317,18 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
     if (!supabase) return
     const form = new FormData(event.currentTarget)
     const suffix = crypto.randomUUID().slice(0, 8).toUpperCase()
+    const phone = String(form.get('phone') ?? '').trim()
     const { error: resultError } = await supabase.from('customers').insert({
       tenant_id: tenantId,
       customer_code: `CUS-${suffix}`,
       full_name: String(form.get('full_name') ?? '').trim(),
-      phone: String(form.get('phone') ?? '').trim(),
+      phone,
+      whatsapp_phone_e164: toWhatsAppE164(phone),
       email: String(form.get('email') ?? '').trim() || null,
       area: String(form.get('area') ?? '').trim() || null,
       city: String(form.get('city') ?? '').trim() || null,
       address: String(form.get('address') ?? '').trim() || null,
+      whatsapp_opt_in: form.get('whatsapp_opt_in') === 'on',
     })
     if (resultError) {
       setError(resultError.message)
@@ -293,6 +336,23 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
     }
     setShowCustomerForm(false)
     onToast('Customer created')
+    await loadData()
+  }
+
+  async function updateCustomerWhatsAppOptIn(id: string, optedIn: boolean) {
+    if (!supabase || !canManage) return
+    setSaving(true)
+    const { error: resultError } = await supabase
+      .from('customers')
+      .update({ whatsapp_opt_in: optedIn, updated_at: new Date().toISOString() })
+      .eq('tenant_id', tenantId)
+      .eq('id', id)
+    setSaving(false)
+    if (resultError) {
+      setError(resultError.message)
+      return
+    }
+    onToast(optedIn ? 'WhatsApp opt-in recorded' : 'WhatsApp opt-in removed')
     await loadData()
   }
 
@@ -333,10 +393,49 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
     }
   }
 
+  async function sendWhatsAppMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase) return
+    const form = new FormData(event.currentTarget)
+    const customerId = String(form.get('customer_id') ?? '')
+    const message = String(form.get('message') ?? '').trim()
+    setWhatsAppError('')
+    setSaving(true)
+    try {
+      const { data: sessionResult, error: sessionError } = await supabase.auth.getSession()
+      if (sessionError) throw new Error(sessionError.message)
+      const accessToken = sessionResult.session?.access_token
+      if (!accessToken) throw new Error('Your session expired. Sign in again to send a message.')
+      const response = await fetch('/api/whatsapp/messages', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ tenantId, customerId, message }),
+      })
+      const result = await response.json() as { error?: string; warning?: string }
+      if (!response.ok) throw new Error(result.error || 'WhatsApp message could not be sent.')
+      setShowWhatsAppForm(false)
+      setBookingCustomerSearch('')
+      onToast(result.warning || 'WhatsApp message sent')
+      await loadData()
+    } catch (sendError) {
+      setWhatsAppError(sendError instanceof Error ? sendError.message : 'WhatsApp message could not be sent.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return <div className="page-content data-workspace">
     <div className="page-heading"><div><div className="eyebrow">{tenant.name}</div><h1>{config.title}</h1><p>{config.description}</p></div>
       <div className="heading-action">
         {page === 'Customers 360' && canManage && <button className="button primary" onClick={() => setShowCustomerForm(true)}><Plus size={15} /> Add customer</button>}
+        {page === 'Dashboard' && canManage && <>
+          <button className="button" onClick={() => setShowCustomerForm(true)}><Plus size={15} /> Add customer</button>
+          <button className="button primary" onClick={() => setShowJobForm(true)}><CalendarDays size={15} /> Book service</button>
+        </>}
+        {page === 'WhatsApp Inbox' && canManage && <button className="button primary" onClick={() => { setWhatsAppError(''); setShowWhatsAppForm(true) }}><MessageCircle size={15} /> Send WhatsApp</button>}
         {['Services & Jobs', 'SERVICE STATUS', 'Service Calendar'].includes(page) && canManage && <button className="button primary" onClick={() => setShowJobForm(true)}><CalendarDays size={15} /> Book service</button>}
         {['AMC Management', 'Technicians', 'Inventory Spares', 'RO Sales & Catalog', 'WhatsApp Automation'].includes(page) && canManage && <button className="button primary" onClick={() => setCreateRecordPage(page)}><Plus size={15} /> Add record</button>}
         {page === 'Invoices & Billing' && (canManage || role === 'accountant') && <button className="button primary" onClick={() => setCreateRecordPage(page)}><Plus size={15} /> Create invoice</button>}
@@ -344,7 +443,8 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
       </div>
     </div>
 
-    {(page === 'Dashboard' || page === 'Business Reports') && <DashboardCards summary={summary} loading={loading} />}
+    {page === 'Dashboard' && <DashboardHome summary={summary} loading={loading} error={error} onNavigate={onNavigate} />}
+    {page === 'Business Reports' && <ReportsDashboard data={reportData} loading={loading} error={error} />}
     {page === 'Business Settings' && <SettingsCard tenant={tenant} />}
 
     {config.table && <section className="panel data-panel">
@@ -355,7 +455,7 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
       </div>
       {error && <div className="data-error" role="alert">{error}</div>}
       {loading ? <div className="empty-state">Loading workspace data…</div> : rows.length === 0 ? <div className="empty-state">No {config.title.toLowerCase()} found. Records you add will appear here.</div> : <div className="table-scroll"><table><thead><tr>{config.columns.map((column) => <th key={column}>{column.replaceAll('_', ' ')}</th>)}{['Services & Jobs', 'SERVICE STATUS', 'Service Calendar'].includes(page) && <th>Update status</th>}</tr></thead><tbody>
-        {rows.map((row) => <tr key={String(row.id)}>{config.columns.map((column) => <td key={column}>{valueFor(row, column)}</td>)}{['Services & Jobs', 'SERVICE STATUS', 'Service Calendar'].includes(page) && <td>{canUpdateJobs ? <select value={String(row.status)} onChange={(event) => void updateJobStatus(String(row.id), event.target.value)}><option>Scheduled</option><option>Technician En Route</option><option>In Progress</option><option>Completed</option><option>Cancelled</option></select> : valueFor(row, 'status')}</td>}</tr>)}
+        {rows.map((row) => <tr key={String(row.id)}>{config.columns.map((column) => <td key={column}>{column === 'whatsapp_opt_in' && canManage ? <button type="button" className={`consent-toggle ${row.whatsapp_opt_in === true ? 'enabled' : ''}`} title="Only mark this if the customer explicitly agreed to receive WhatsApp messages." disabled={saving} onClick={() => void updateCustomerWhatsAppOptIn(String(row.id), row.whatsapp_opt_in !== true)}>{valueFor(row, column)}</button> : valueFor(row, column)}</td>)}{['Services & Jobs', 'SERVICE STATUS', 'Service Calendar'].includes(page) && <td>{canUpdateJobs ? <select value={String(row.status)} onChange={(event) => void updateJobStatus(String(row.id), event.target.value)}><option>Scheduled</option><option>Technician En Route</option><option>In Progress</option><option>Completed</option><option>Cancelled</option></select> : valueFor(row, 'status')}</td>}</tr>)}
       </tbody></table></div>}
       <div className="table-footer"><span>Page {pageIndex + 1} · Maximum {pageSize} rows per page</span><div><button className="icon-button" disabled={pageIndex === 0} onClick={() => setPageIndex((value) => Math.max(0, value - 1))}><ChevronLeft size={15} /></button><button className="icon-button" disabled={rows.length < pageSize} onClick={() => setPageIndex((value) => value + 1)}><ChevronRight size={15} /></button></div></div>
     </section>}
@@ -364,6 +464,7 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
       <label className="field-label">CUSTOMER NAME<input name="full_name" required maxLength={160} /></label><label className="field-label">PHONE<input name="phone" required maxLength={32} /></label>
       <label className="field-label">EMAIL<input name="email" type="email" maxLength={254} /></label><label className="field-label">AREA<input name="area" maxLength={120} /></label>
       <label className="field-label">CITY<input name="city" maxLength={120} /></label><label className="field-label">ADDRESS<input name="address" maxLength={500} /></label>
+      <label className="consent-field span-two"><input name="whatsapp_opt_in" type="checkbox" /><span>Customer has explicitly opted in to WhatsApp messages.</span></label>
     </div><div className="modal-actions"><button type="button" className="button" onClick={() => setShowCustomerForm(false)}>Cancel</button><button className="button primary">Save customer</button></div></form></Modal>}
     {showJobForm && <Modal title="Book a service" onClose={() => setShowJobForm(false)}><form className="modal-form" onSubmit={bookJob}><div className="form-grid">
       <label className="field-label span-two">FIND CUSTOMER<input value={bookingCustomerSearch} onChange={(event) => setBookingCustomerSearch(event.target.value)} placeholder="Search customer name" /></label>
@@ -372,6 +473,16 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
       <label className="field-label">SERVICE TYPE<select name="service_type"><option>Routine Filter Change</option><option>AMC Visit</option><option>Breakdown Repair</option><option>Installation</option></select></label><label className="field-label">SCHEDULED DATE &amp; TIME<input name="scheduled_at" type="datetime-local" required /></label>
       <label className="field-label span-two">NOTES<textarea name="notes" maxLength={2000} /></label>
     </div><div className="modal-actions"><button type="button" className="button" onClick={() => setShowJobForm(false)}>Cancel</button><button className="button primary">Schedule service</button></div></form></Modal>}
+    {showWhatsAppForm && <Modal title="Send WhatsApp message" onClose={() => setShowWhatsAppForm(false)}><form className="modal-form" onSubmit={sendWhatsAppMessage}>
+      <div className="form-grid">
+        <label className="field-label span-two">FIND OPTED-IN CUSTOMER<input value={bookingCustomerSearch} onChange={(event) => setBookingCustomerSearch(event.target.value)} placeholder="Search customer name" /></label>
+        <label className="field-label span-two">CUSTOMER<select name="customer_id" required defaultValue=""><option value="" disabled>Select an opted-in customer</option>{customerOptions.filter((customer) => customer.whatsapp_opt_in === true).map((customer) => <option value={String(customer.id)} key={String(customer.id)}>{String(customer.full_name)} · {String(customer.phone)}</option>)}</select></label>
+        <label className="field-label span-two">MESSAGE<textarea name="message" required maxLength={4096} rows={5} placeholder="Write a message for this customer" /></label>
+      </div>
+      <p className="whatsapp-policy-note">Messages are sent one at a time and only within 24 hours of the customer messaging your WhatsApp number. Record opt-in only after the customer agrees.</p>
+      {whatsAppError && <p className="form-error" role="alert">{whatsAppError}</p>}
+      <div className="modal-actions"><button type="button" className="button" onClick={() => setShowWhatsAppForm(false)}>Cancel</button><button className="button primary" disabled={saving}>{saving ? 'Sending…' : 'Send message'}</button></div>
+    </form></Modal>}
     {createRecordPage && <Modal title={`Add ${pageConfig[createRecordPage].title.toLowerCase()}`} onClose={() => setCreateRecordPage(null)}><form className="modal-form" onSubmit={addRecord}>
       <div className="form-grid">
         {createRecordPage === 'AMC Management' && <>
@@ -412,17 +523,184 @@ export default function Workspace({ page, tenantId, role, tenant, onToast }: Pro
   </div>
 }
 
-function DashboardCards({ summary, loading }: { summary: DashboardSummary | null; loading: boolean }) {
+function reportMonthKey(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 7)
+}
+
+function buildReportSeries(data: ReportData, metric: ReportMetric, period: number) {
+  if (metric === 'job-status') {
+    const statuses = ['Scheduled', 'Technician En Route', 'In Progress', 'Completed', 'Cancelled']
+    const counts = new Map(statuses.map((status) => [status, 0]))
+    data.jobs.forEach((job) => counts.set(job.status, (counts.get(job.status) ?? 0) + 1))
+    return {
+      label: 'Service jobs by status',
+      description: 'Jobs scheduled in the selected period',
+      categories: statuses,
+      values: statuses.map((status) => counts.get(status) ?? 0),
+      valueKind: 'count' as const,
+      observationCount: data.jobs.length,
+    }
+  }
+
+  const now = new Date()
+  const months = Array.from({ length: period }, (_, index) =>
+    new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - period + index + 1, 1)))
+  const categories = months.map((month) => month.toLocaleDateString('en-IN', { month: 'short', year: '2-digit', timeZone: 'UTC' }))
+  const monthIndices = new Map(months.map((month, index) => [month.toISOString().slice(0, 7), index]))
+  const values = Array(period).fill(0) as number[]
+  let observationCount = 0
+  let valueKind: 'count' | 'currency' = 'count'
+  let label = ''
+  let description = ''
+
+  if (metric === 'customers') {
+    label = 'New customers'
+    description = 'Customer records created each month'
+    data.customers.forEach((customer) => {
+      const index = monthIndices.get(reportMonthKey(customer.created_at))
+      if (index !== undefined) {
+        values[index] += 1
+        observationCount += 1
+      }
+    })
+  } else if (metric === 'jobs') {
+    label = 'Service jobs'
+    description = 'Jobs scheduled each month'
+    data.jobs.forEach((job) => {
+      const index = monthIndices.get(reportMonthKey(job.scheduled_at))
+      if (index !== undefined) {
+        values[index] += 1
+        observationCount += 1
+      }
+    })
+  } else if (metric === 'contracts') {
+    label = 'AMC contracts ending'
+    description = 'Contracts reaching their end date each month'
+    data.contracts.forEach((contract) => {
+      const index = monthIndices.get(reportMonthKey(contract.ends_on))
+      if (index !== undefined) {
+        values[index] += 1
+        observationCount += 1
+      }
+    })
+  } else {
+    label = 'Paid revenue'
+    description = 'Total paid invoice value by payment month'
+    valueKind = 'currency'
+    data.invoices.forEach((invoice) => {
+      const index = monthIndices.get(reportMonthKey(invoice.paid_at))
+      if (index !== undefined) {
+        values[index] += invoice.total
+        observationCount += 1
+      }
+    })
+  }
+
+  return { label, description, categories, values, valueKind, observationCount }
+}
+
+function ReportsDashboard({ data, loading, error }: { data: ReportData | null; loading: boolean; error: string }) {
+  const [metric, setMetric] = useState<ReportMetric>('customers')
+  const [chartType, setChartType] = useState<ReportChartType>('bar')
+  const [period, setPeriod] = useState(12)
+  const series = useMemo(() => data ? buildReportSeries(data, metric, period) : null, [data, metric, period])
+  const total = series?.values.reduce((sum, value) => sum + value, 0) ?? 0
+
+  return <section className="panel report-builder">
+    <div className="report-builder-header">
+      <div><h2>Explore your business</h2><p>Choose a metric, time range, and chart style.</p></div>
+      <div className="report-controls">
+        <label className="field-label">METRIC<select value={metric} onChange={(event) => setMetric(event.target.value as ReportMetric)}>
+          <option value="customers">New customers</option>
+          <option value="jobs">Service jobs by month</option>
+          <option value="job-status">Service jobs by status</option>
+          <option value="contracts">AMC contracts ending</option>
+          <option value="revenue">Paid revenue</option>
+        </select></label>
+        <label className="field-label">CHART TYPE<select value={chartType} onChange={(event) => setChartType(event.target.value as ReportChartType)}>
+          <option value="bar">2D · Bar</option>
+          <option value="line">2D · Line</option>
+          <option value="pie">2D · Pie</option>
+          <option value="donut">2D · Donut</option>
+          <option value="bar3d">3D · Interactive columns</option>
+          <option value="line3d">3D · Interactive trend</option>
+        </select></label>
+        <label className="field-label">RANGE<select value={period} onChange={(event) => setPeriod(Number(event.target.value))}>
+          <option value={6}>Last 6 months</option>
+          <option value={12}>Last 12 months</option>
+        </select></label>
+      </div>
+    </div>
+    {error ? <div className="data-error" role="alert">Reports could not be loaded: {error}</div>
+      : loading || !series ? <div className="report-empty">Loading report data…</div>
+        : series.observationCount === 0 ? <div className="report-empty"><strong>No activity in this range yet</strong><span>Try another metric or time range as your workspace grows.</span></div>
+          : <div className="report-visualization">
+            <div className="report-chart-heading"><div><h3>{series.label}</h3><p>{series.description}</p></div><strong>{series.valueKind === 'currency' ? money(total) : total.toLocaleString('en-IN')}<small>{series.valueKind === 'currency' ? 'total paid' : 'total records'}</small></strong></div>
+            <ReportChart categories={series.categories} values={series.values} chartType={chartType} valueKind={series.valueKind} />
+            <ul className="sr-only">{series.categories.map((category, index) => <li key={category}>{category}: {series.valueKind === 'currency' ? money(series.values[index]) : series.values[index]}</li>)}</ul>
+          </div>}
+  </section>
+}
+
+function DashboardHome({
+  summary,
+  loading,
+  error,
+  onNavigate,
+}: {
+  summary: DashboardSummary | null
+  loading: boolean
+  error: string
+  onNavigate: (page: ViewKey) => void
+}) {
+  const count = (value: number | undefined) => loading ? '…' : error ? '—' : String(value ?? 0)
+  const amount = (value: number | undefined) => loading ? '…' : error ? '—' : money(value ?? 0)
+  const overdue = summary?.overdue_jobs ?? 0
+
   const cards = [
-    ['Customers', summary?.customer_count],
-    ['Active AMC contracts', summary?.active_contract_count],
-    ['Contracts expiring soon', summary?.expiring_contract_count],
-    ['Jobs today', summary?.jobs_today],
-    ['Overdue jobs', summary?.overdue_jobs],
-    ['Revenue this month', summary?.revenue_this_month === undefined ? undefined : money(summary.revenue_this_month)],
-    ['Unpaid invoices', summary?.pending_invoice_amount === undefined ? undefined : money(summary.pending_invoice_amount)],
+    { label: 'Customers', value: summary?.customer_count, note: 'In your workspace', icon: Users, tone: 'blue' },
+    { label: 'Active contracts', value: summary?.active_contract_count, note: `${count(summary?.expiring_contract_count)} expiring in 30 days`, icon: ShieldCheck, tone: 'green' },
+    { label: 'Services today', value: summary?.jobs_today, note: 'Scheduled field visits', icon: Wrench, tone: 'violet' },
+    { label: 'Overdue jobs', value: summary?.overdue_jobs, note: overdue > 0 ? 'Follow-up needed' : 'No overdue visits', icon: AlertTriangle, tone: overdue > 0 ? 'amber' : 'green' },
   ]
-  return <div className="data-stat-grid">{cards.map(([label, value]) => <section className="panel data-stat" key={String(label)}><span>{label}</span><strong>{loading ? '…' : String(value ?? 0)}</strong></section>)}</div>
+
+  return <div className="dashboard-home">
+    {error && <div className="data-error" role="alert">Dashboard data could not be loaded: {error}</div>}
+    <div className="dashboard-kpis">
+      {cards.map(({ label, value, note, icon: Icon, tone }) => <section className="panel dashboard-kpi" key={label}>
+        <div className="dashboard-kpi-top"><span>{label}</span><span className={`dashboard-kpi-icon ${tone}`}><Icon size={18} /></span></div>
+        <strong>{count(value)}</strong>
+        <small>{note}</small>
+      </section>)}
+    </div>
+    <div className="dashboard-overview-grid">
+      <section className="panel dashboard-overview-card">
+        <div className="dashboard-overview-heading"><span className="dashboard-overview-icon blue"><CalendarDays size={17} /></span><div><h2>Service workload</h2><p>Today at a glance</p></div></div>
+        <div className="dashboard-overview-rows">
+          <div><span>Scheduled today</span><strong>{count(summary?.jobs_today)}</strong></div>
+          <div><span>Overdue follow-ups</span><strong className={overdue > 0 ? 'attention' : ''}>{count(summary?.overdue_jobs)}</strong></div>
+        </div>
+        <button className="dashboard-card-link" onClick={() => onNavigate('Services & Jobs')}>Open service jobs <ArrowRight size={14} /></button>
+      </section>
+      <section className="panel dashboard-overview-card">
+        <div className="dashboard-overview-heading"><span className="dashboard-overview-icon green"><ShieldCheck size={17} /></span><div><h2>AMC renewals</h2><p>Keep upcoming renewals in view</p></div></div>
+        <div className="dashboard-overview-rows">
+          <div><span>Active contracts</span><strong>{count(summary?.active_contract_count)}</strong></div>
+          <div><span>Expiring in 30 days</span><strong>{count(summary?.expiring_contract_count)}</strong></div>
+        </div>
+        <button className="dashboard-card-link" onClick={() => onNavigate('AMC Management')}>Manage contracts <ArrowRight size={14} /></button>
+      </section>
+      <section className="panel dashboard-overview-card">
+        <div className="dashboard-overview-heading"><span className="dashboard-overview-icon violet"><CircleDollarSign size={17} /></span><div><h2>Financial snapshot</h2><p>Current month and outstanding</p></div></div>
+        <div className="dashboard-overview-rows">
+          <div><span>Revenue this month</span><strong>{amount(summary?.revenue_this_month)}</strong></div>
+          <div><span>Unpaid invoices</span><strong>{amount(summary?.pending_invoice_amount)}</strong></div>
+        </div>
+        <button className="dashboard-card-link" onClick={() => onNavigate('Invoices & Billing')}>View invoices <ArrowRight size={14} /></button>
+      </section>
+    </div>
+  </div>
 }
 
 function SettingsCard({ tenant }: { tenant: Props['tenant'] }) {

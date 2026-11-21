@@ -156,7 +156,7 @@ export default function AppShell() {
         <div className="topbar-left"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>{selectedTenant.name}</span><strong>{page}</strong></div></div>
         <div className="topbar-tools"><span className="sync-pill">Supabase connected</span><button className="button header-book" onClick={() => setPage('Services & Jobs')}><CalendarDays size={14} /> Services</button><button className="button primary header-add" onClick={() => setPage('Customers 360')}><Users size={15} /> Customers</button><button className="header-logout" onClick={signOut} aria-label="Sign out"><LogOut size={16} /></button></div>
       </header>
-      <div className="workspace"><Workspace key={`${selectedTenant.id}-${page}`} page={page} tenantId={selectedTenant.id} role={tenantRoles[selectedTenant.id]} tenant={selectedTenant} onToast={toast} /></div>
+      <div className="workspace"><Workspace key={`${selectedTenant.id}-${page}`} page={page} tenantId={selectedTenant.id} role={tenantRoles[selectedTenant.id]} tenant={selectedTenant} onToast={toast} onNavigate={setPage} /></div>
       <footer className="app-footer"><span>AMC Desk · {selectedTenant.name}</span><span>{userEmail}</span></footer>
     </main>
     {notice && <div className="toast">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}

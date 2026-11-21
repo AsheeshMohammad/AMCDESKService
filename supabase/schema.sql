@@ -32,6 +32,8 @@ create table if not exists public.customers (
   customer_code text not null,
   full_name text not null,
   phone text not null,
+  whatsapp_phone_e164 text,
+  whatsapp_opt_in boolean not null default false,
   email text,
   address text,
   area text,
@@ -40,6 +42,29 @@ create table if not exists public.customers (
   updated_at timestamptz not null default now(),
   unique (tenant_id, customer_code)
 );
+
+alter table public.customers
+  add column if not exists whatsapp_phone_e164 text,
+  add column if not exists whatsapp_opt_in boolean not null default false;
+
+update public.customers as customer
+set whatsapp_phone_e164 = case
+  when left(customer.phone, 1) = '+'
+    and length(normalized.digits) between 8 and 15 then '+' || normalized.digits
+  when left(customer.phone, 2) = '00'
+    and length(normalized.digits) between 10 and 17 then '+' || substr(normalized.digits, 3)
+  when length(normalized.digits) = 10 then '+91' || normalized.digits
+  when length(normalized.digits) = 11 and left(normalized.digits, 1) = '0'
+    then '+91' || substr(normalized.digits, 2)
+  when length(normalized.digits) between 11 and 15 then '+' || normalized.digits
+  else null
+end
+from (
+  select id, regexp_replace(phone, '[^0-9]', '', 'g') as digits
+  from public.customers
+) as normalized
+where customer.id = normalized.id
+  and customer.whatsapp_phone_e164 is null;
 
 create table if not exists public.purifier_units (
   id uuid primary key default gen_random_uuid(),
@@ -237,6 +262,7 @@ $$;
 
 create index if not exists customers_tenant_name_idx on public.customers (tenant_id, full_name, id);
 create index if not exists customers_tenant_phone_idx on public.customers (tenant_id, phone);
+create index if not exists customers_tenant_whatsapp_phone_idx on public.customers (tenant_id, whatsapp_phone_e164);
 create index if not exists technicians_tenant_active_idx on public.technicians (tenant_id, is_active, full_name);
 create index if not exists service_jobs_tenant_schedule_idx on public.service_jobs (tenant_id, scheduled_at desc, id);
 create index if not exists service_jobs_tenant_status_idx on public.service_jobs (tenant_id, status, scheduled_at);
