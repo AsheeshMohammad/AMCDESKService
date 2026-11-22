@@ -18,15 +18,11 @@ type Props = {
   page: ViewKey
   tenantId: string
   role: string | undefined
-  tenant: {
-    name: string
-    city: string | null
-    gstin: string | null
-    upi_id: string | null
-    custom_domain: string | null
-  }
+  theme: 'light' | 'dark'
+  tenant: TenantProfile
   onToast: (message: string) => void
   onNavigate: (page: ViewKey) => void
+  onTenantUpdated: (tenant: TenantProfile) => void
 }
 
 type Row = Record<string, unknown>
@@ -46,6 +42,20 @@ type ReportData = {
   invoices: { paid_at: string; total: number }[]
 }
 type ReportMetric = 'customers' | 'jobs' | 'job-status' | 'contracts' | 'revenue'
+type TenantProfile = {
+  id: string
+  name: string
+  slug: string
+  owner_name: string
+  updated_at: string
+  city: string | null
+  business_phone: string | null
+  business_email: string | null
+  address: string | null
+  gstin: string | null
+  upi_id: string | null
+  custom_domain: string | null
+}
 
 const pageConfig: Record<ViewKey, { table: string; title: string; description: string; columns: string[] }> = {
   Dashboard: { table: '', title: 'Dashboard', description: 'Live operational summary for this workspace.', columns: [] },
@@ -89,16 +99,90 @@ function valueFor(row: Row, column: string) {
   return String(value)
 }
 
-export default function Workspace({ page, tenantId, role, tenant, onToast, onNavigate }: Props) {
+const snapshotFreshMs = 30_000
+const snapshotMaxAgeMs = 10 * 60_000
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function isDashboardSummary(value: unknown): value is DashboardSummary {
+  const fields: (keyof DashboardSummary)[] = [
+    'customer_count', 'active_contract_count', 'expiring_contract_count', 'jobs_today',
+    'overdue_jobs', 'pending_invoice_amount', 'revenue_this_month',
+  ]
+  return isRecord(value) && fields.every((field) => typeof value[field] === 'number' && Number.isFinite(value[field]))
+}
+
+function isReportData(value: unknown): value is ReportData {
+  return isRecord(value)
+    && Array.isArray(value.customers)
+    && value.customers.every((row) => isRecord(row) && typeof row.created_at === 'string')
+    && Array.isArray(value.jobs)
+    && value.jobs.every((row) => isRecord(row) && typeof row.scheduled_at === 'string' && typeof row.status === 'string')
+    && Array.isArray(value.contracts)
+    && value.contracts.every((row) => isRecord(row) && typeof row.ends_on === 'string')
+    && Array.isArray(value.invoices)
+    && value.invoices.every((row) => isRecord(row) && typeof row.paid_at === 'string' && typeof row.total === 'number')
+}
+
+function readWorkspaceSnapshot<T>(
+  key: string,
+  isValue: (value: unknown) => value is T,
+): { savedAt: number; value: T } | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.sessionStorage.getItem(key)
+    if (!raw) return null
+    const stored: unknown = JSON.parse(raw)
+    if (!isRecord(stored) || typeof stored.savedAt !== 'number' || !isValue(stored.value)) {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+    if (Date.now() - stored.savedAt > snapshotMaxAgeMs) {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+    return { savedAt: stored.savedAt, value: stored.value }
+  } catch (error) {
+    console.warn('Could not restore a cached workspace summary; loading fresh data.', error)
+    return null
+  }
+}
+
+function writeWorkspaceSnapshot<T>(key: string, value: T) {
+  if (typeof window === 'undefined') return
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), value }))
+  } catch (error) {
+    console.warn('Could not cache the workspace summary; fresh data will load next time.', error)
+  }
+}
+
+function invalidateWorkspaceSnapshots(tenantId: string) {
+  if (typeof window === 'undefined') return
+  window.sessionStorage.removeItem(`amc-desk:snapshot:${tenantId}:dashboard`)
+  window.sessionStorage.removeItem(`amc-desk:snapshot:${tenantId}:reports`)
+}
+
+export default function Workspace({ page, tenantId, role, theme, tenant, onToast, onNavigate, onTenantUpdated }: Props) {
   const supabase = getSupabaseClient()
   const config = pageConfig[page]
+  const dashboardSnapshotKey = `amc-desk:snapshot:${tenantId}:dashboard`
+  const reportsSnapshotKey = `amc-desk:snapshot:${tenantId}:reports`
   const [rows, setRows] = useState<Row[]>([])
-  const [summary, setSummary] = useState<DashboardSummary | null>(null)
-  const [reportData, setReportData] = useState<ReportData | null>(null)
+  const [summary, setSummary] = useState<DashboardSummary | null>(() =>
+    page === 'Dashboard' ? readWorkspaceSnapshot(dashboardSnapshotKey, isDashboardSummary)?.value ?? null : null)
+  const [reportData, setReportData] = useState<ReportData | null>(() =>
+    page === 'Business Reports' ? readWorkspaceSnapshot(reportsSnapshotKey, isReportData)?.value ?? null : null)
   const [customerOptions, setCustomerOptions] = useState<Row[]>([])
   const [technicianOptions, setTechnicianOptions] = useState<Row[]>([])
   const [bookingCustomerSearch, setBookingCustomerSearch] = useState('')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => {
+    if (page === 'Dashboard') return readWorkspaceSnapshot(dashboardSnapshotKey, isDashboardSummary) === null
+    if (page === 'Business Reports') return readWorkspaceSnapshot(reportsSnapshotKey, isReportData) === null
+    return true
+  })
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [pageIndex, setPageIndex] = useState(0)
@@ -112,11 +196,22 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
   const canManage = role === 'owner' || role === 'admin' || role === 'manager'
   const canUpdateJobs = canManage || role === 'technician'
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (force = false) => {
     if (!supabase) return
-    setLoading(true)
+    const cachedSnapshot = page === 'Dashboard'
+      ? readWorkspaceSnapshot(dashboardSnapshotKey, isDashboardSummary)
+      : page === 'Business Reports'
+        ? readWorkspaceSnapshot(reportsSnapshotKey, isReportData)
+        : null
+    if (!force && cachedSnapshot && Date.now() - cachedSnapshot.savedAt < snapshotFreshMs) {
+      setLoading(false)
+      setError('')
+      return
+    }
+    setLoading(cachedSnapshot === null)
     setError('')
-    if (page === 'Business Reports') {
+    try {
+      if (page === 'Business Reports') {
       const now = new Date()
       const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1))
       const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
@@ -130,16 +225,20 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
       ])
       const resultError = [customersResult.error, jobsResult.error, contractsResult.error, invoicesResult.error].find(Boolean)
       if (resultError) setError(resultError.message)
-      else setReportData({
-        customers: customersResult.data ?? [],
-        jobs: jobsResult.data ?? [],
-        contracts: contractsResult.data ?? [],
-        invoices: (invoicesResult.data ?? []).flatMap((invoice) => invoice.paid_at
+      else {
+        const freshReportData = {
+          customers: customersResult.data ?? [],
+          jobs: jobsResult.data ?? [],
+          contracts: contractsResult.data ?? [],
+          invoices: (invoicesResult.data ?? []).flatMap((invoice) => invoice.paid_at
           ? [{ paid_at: invoice.paid_at, total: Number(invoice.total ?? 0) }]
           : []),
-      })
+        }
+        setReportData(freshReportData)
+        writeWorkspaceSnapshot(reportsSnapshotKey, freshReportData)
+      }
       setRows([])
-    } else if (page === 'Dashboard') {
+      } else if (page === 'Dashboard') {
       const now = new Date()
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
@@ -171,25 +270,29 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
         revenueResult.error,
       ].find(Boolean)
       if (results) setError(results.message)
-      else setSummary({
-        customer_count: customersResult.count ?? 0,
-        active_contract_count: activeContractsResult.count ?? 0,
-        expiring_contract_count: expiringContractsResult.count ?? 0,
-        jobs_today: jobsTodayResult.count ?? 0,
-        overdue_jobs: overdueJobsResult.count ?? 0,
-        pending_invoice_amount: (unpaidInvoicesResult.data ?? []).reduce((sum, row) => sum + Number(row.total ?? 0), 0),
-        revenue_this_month: (revenueResult.data ?? []).reduce((sum, row) => sum + Number(row.total ?? 0), 0),
-      })
+      else {
+        const freshSummary = {
+          customer_count: customersResult.count ?? 0,
+          active_contract_count: activeContractsResult.count ?? 0,
+          expiring_contract_count: expiringContractsResult.count ?? 0,
+          jobs_today: jobsTodayResult.count ?? 0,
+          overdue_jobs: overdueJobsResult.count ?? 0,
+          pending_invoice_amount: (unpaidInvoicesResult.data ?? []).reduce((sum, row) => sum + Number(row.total ?? 0), 0),
+          revenue_this_month: (revenueResult.data ?? []).reduce((sum, row) => sum + Number(row.total ?? 0), 0),
+        }
+        setSummary(freshSummary)
+        writeWorkspaceSnapshot(dashboardSnapshotKey, freshSummary)
+      }
       setRows([])
-    } else if (page === 'Business Settings') {
+      } else if (page === 'Business Settings') {
       const { data, error: resultError } = await supabase
         .from('tenants')
-        .select('name, slug, city, gstin, upi_id, custom_domain')
+        .select('id, name, slug, owner_name, updated_at, city, business_phone, business_email, address, gstin, upi_id, custom_domain')
         .eq('id', tenantId)
         .maybeSingle()
       if (resultError) setError(resultError.message)
-      else setRows(data ? [data as Row] : [])
-    } else {
+      else if (data) onTenantUpdated(data)
+      } else {
       const sortColumn: Record<string, string> = {
         customers: 'full_name',
         technicians: 'full_name',
@@ -214,10 +317,13 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
       const { data, error: resultError } = await request
       if (resultError) setError(resultError.message)
       else setRows((data ?? []) as unknown as Row[])
+      }
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : `Could not load ${config.title.toLowerCase()} data.`)
+    } finally {
+      setLoading(false)
     }
-
-    setLoading(false)
-  }, [config.table, page, pageIndex, query, supabase, tenantId])
+  }, [config.table, config.title, dashboardSnapshotKey, onTenantUpdated, page, pageIndex, query, reportsSnapshotKey, supabase, tenantId])
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadData() }, 0)
@@ -246,6 +352,8 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
       else setCustomerOptions((customersResult.data ?? []) as unknown as Row[])
       if (techniciansResult.error) setError(techniciansResult.error.message)
       else setTechnicianOptions((techniciansResult.data ?? []) as unknown as Row[])
+    }).catch((loadError: unknown) => {
+      if (active) setError(loadError instanceof Error ? loadError.message : 'Could not load customer and technician options.')
     })
 
     return () => { active = false }
@@ -309,7 +417,8 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
     setCreateRecordPage(null)
     setBookingCustomerSearch('')
     onToast(`${pageConfig[createRecordPage].title} record created`)
-    await loadData()
+    invalidateWorkspaceSnapshots(tenantId)
+    await loadData(true)
   }
 
   async function addCustomer(event: FormEvent<HTMLFormElement>) {
@@ -336,7 +445,8 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
     }
     setShowCustomerForm(false)
     onToast('Customer created')
-    await loadData()
+    invalidateWorkspaceSnapshots(tenantId)
+    await loadData(true)
   }
 
   async function updateCustomerWhatsAppOptIn(id: string, optedIn: boolean) {
@@ -376,7 +486,8 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
     }
     setShowJobForm(false)
     onToast('Service job scheduled')
-    await loadData()
+    invalidateWorkspaceSnapshots(tenantId)
+    await loadData(true)
   }
 
   async function updateJobStatus(id: string, status: string) {
@@ -389,7 +500,8 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
     if (resultError) setError(resultError.message)
     else {
       onToast('Job status updated')
-      await loadData()
+      invalidateWorkspaceSnapshots(tenantId)
+      await loadData(true)
     }
   }
 
@@ -439,13 +551,13 @@ export default function Workspace({ page, tenantId, role, tenant, onToast, onNav
         {['Services & Jobs', 'SERVICE STATUS', 'Service Calendar'].includes(page) && canManage && <button className="button primary" onClick={() => setShowJobForm(true)}><CalendarDays size={15} /> Book service</button>}
         {['AMC Management', 'Technicians', 'Inventory Spares', 'RO Sales & Catalog', 'WhatsApp Automation'].includes(page) && canManage && <button className="button primary" onClick={() => setCreateRecordPage(page)}><Plus size={15} /> Add record</button>}
         {page === 'Invoices & Billing' && (canManage || role === 'accountant') && <button className="button primary" onClick={() => setCreateRecordPage(page)}><Plus size={15} /> Create invoice</button>}
-        <button className="button" onClick={() => void loadData()} aria-label="Refresh data"><RefreshCw size={14} /></button>
+        <button className="button" onClick={() => void loadData(true)} aria-label="Refresh data"><RefreshCw size={14} /></button>
       </div>
     </div>
 
     {page === 'Dashboard' && <DashboardHome summary={summary} loading={loading} error={error} onNavigate={onNavigate} />}
-    {page === 'Business Reports' && <ReportsDashboard data={reportData} loading={loading} error={error} />}
-    {page === 'Business Settings' && <SettingsCard tenant={tenant} />}
+    {page === 'Business Reports' && <ReportsDashboard data={reportData} loading={loading} error={error} theme={theme} />}
+    {page === 'Business Settings' && <SettingsCard key={tenant.updated_at} tenant={tenant} role={role} onToast={onToast} onTenantUpdated={onTenantUpdated} />}
 
     {config.table && <section className="panel data-panel">
       <div className="data-toolbar">
@@ -600,7 +712,7 @@ function buildReportSeries(data: ReportData, metric: ReportMetric, period: numbe
   return { label, description, categories, values, valueKind, observationCount }
 }
 
-function ReportsDashboard({ data, loading, error }: { data: ReportData | null; loading: boolean; error: string }) {
+function ReportsDashboard({ data, loading, error, theme }: { data: ReportData | null; loading: boolean; error: string; theme: 'light' | 'dark' }) {
   const [metric, setMetric] = useState<ReportMetric>('customers')
   const [chartType, setChartType] = useState<ReportChartType>('bar')
   const [period, setPeriod] = useState(12)
@@ -623,8 +735,9 @@ function ReportsDashboard({ data, loading, error }: { data: ReportData | null; l
           <option value="line">2D · Line</option>
           <option value="pie">2D · Pie</option>
           <option value="donut">2D · Donut</option>
-          <option value="bar3d">3D · Interactive columns</option>
-          <option value="line3d">3D · Interactive trend</option>
+          <option value="pie3d">3D · Pie</option>
+          <option value="bar3d">3D · Bar graph</option>
+          <option value="line3d">3D · Trend</option>
         </select></label>
         <label className="field-label">RANGE<select value={period} onChange={(event) => setPeriod(Number(event.target.value))}>
           <option value={6}>Last 6 months</option>
@@ -637,7 +750,7 @@ function ReportsDashboard({ data, loading, error }: { data: ReportData | null; l
         : series.observationCount === 0 ? <div className="report-empty"><strong>No activity in this range yet</strong><span>Try another metric or time range as your workspace grows.</span></div>
           : <div className="report-visualization">
             <div className="report-chart-heading"><div><h3>{series.label}</h3><p>{series.description}</p></div><strong>{series.valueKind === 'currency' ? money(total) : total.toLocaleString('en-IN')}<small>{series.valueKind === 'currency' ? 'total paid' : 'total records'}</small></strong></div>
-            <ReportChart categories={series.categories} values={series.values} chartType={chartType} valueKind={series.valueKind} />
+            <ReportChart categories={series.categories} values={series.values} chartType={chartType} valueKind={series.valueKind} theme={theme} />
             <ul className="sr-only">{series.categories.map((category, index) => <li key={category}>{category}: {series.valueKind === 'currency' ? money(series.values[index]) : series.values[index]}</li>)}</ul>
           </div>}
   </section>
@@ -703,8 +816,92 @@ function DashboardHome({
   </div>
 }
 
-function SettingsCard({ tenant }: { tenant: Props['tenant'] }) {
-  return <section className="panel settings-panel data-settings"><h2>Business profile</h2><dl>{Object.entries(tenant).map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{value || 'Not set'}</dd></div>)}</dl></section>
+function SettingsCard({
+  tenant,
+  role,
+  onToast,
+  onTenantUpdated,
+}: {
+  tenant: TenantProfile
+  role: string | undefined
+  onToast: Props['onToast']
+  onTenantUpdated: Props['onTenantUpdated']
+}) {
+  const supabase = getSupabaseClient()
+  const canManage = role === 'owner' || role === 'admin' || role === 'manager'
+  const [profile, setProfile] = useState({
+    name: tenant.name,
+    owner_name: tenant.owner_name,
+    business_phone: tenant.business_phone ?? '',
+    business_email: tenant.business_email ?? '',
+    address: tenant.address ?? '',
+    city: tenant.city ?? '',
+    gstin: tenant.gstin ?? '',
+    upi_id: tenant.upi_id ?? '',
+    custom_domain: tenant.custom_domain ?? '',
+  })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  function updateField(field: keyof typeof profile, value: string) {
+    setProfile((current) => ({ ...current, [field]: value }))
+  }
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase || !canManage) return
+    setSaving(true)
+    setError('')
+    const updates = {
+      name: profile.name.trim(),
+      owner_name: profile.owner_name.trim(),
+      business_phone: profile.business_phone.trim() || null,
+      business_email: profile.business_email.trim() || null,
+      address: profile.address.trim() || null,
+      city: profile.city.trim(),
+      gstin: profile.gstin.trim() || null,
+      upi_id: profile.upi_id.trim() || null,
+      custom_domain: profile.custom_domain.trim() || null,
+      updated_at: new Date().toISOString(),
+    }
+    const { data, error: saveError } = await supabase
+      .from('tenants')
+      .update(updates)
+      .eq('id', tenant.id)
+      .select('id, name, slug, owner_name, updated_at, city, business_phone, business_email, address, gstin, upi_id, custom_domain')
+      .maybeSingle()
+    setSaving(false)
+    if (saveError) {
+      setError(saveError.message)
+      return
+    }
+    if (!data) {
+      setError('No workspace was updated. Check that you have permission to edit these details.')
+      return
+    }
+    onTenantUpdated(data)
+    onToast('Business details saved')
+  }
+
+  return <section className="panel settings-panel settings-editor">
+    <div className="settings-editor-heading"><div><h2>Business profile</h2><p>These details identify your business in AMC Desk.</p></div></div>
+    <form className="settings-form" onSubmit={saveProfile}>
+      <div className="settings-fields">
+        <label className="field-label">BUSINESS NAME<input required maxLength={160} value={profile.name} onChange={(event) => updateField('name', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label">OWNER / CONTACT PERSON<input required maxLength={160} value={profile.owner_name} onChange={(event) => updateField('owner_name', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label">BUSINESS PHONE<input type="tel" maxLength={32} value={profile.business_phone} onChange={(event) => updateField('business_phone', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label">BUSINESS EMAIL<input type="email" maxLength={254} value={profile.business_email} onChange={(event) => updateField('business_email', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label settings-address">BUSINESS ADDRESS<input maxLength={500} value={profile.address} onChange={(event) => updateField('address', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label">CITY<input maxLength={120} value={profile.city} onChange={(event) => updateField('city', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label">GSTIN<input maxLength={32} value={profile.gstin} onChange={(event) => updateField('gstin', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label">UPI ID<input maxLength={120} value={profile.upi_id} onChange={(event) => updateField('upi_id', event.target.value)} disabled={!canManage} /></label>
+        <label className="field-label">WEBSITE / DOMAIN<input maxLength={253} value={profile.custom_domain} onChange={(event) => updateField('custom_domain', event.target.value)} disabled={!canManage} placeholder="example.com" /></label>
+      </div>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {!canManage && <p className="settings-permission-note">Only workspace owners, admins, and managers can edit business details.</p>}
+      {canManage && <div className="settings-editor-actions"><button className="button primary" disabled={saving}>{saving ? 'Saving…' : 'Save business details'}</button></div>}
+    </form>
+  </section>
 }
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {

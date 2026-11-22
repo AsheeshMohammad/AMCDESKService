@@ -1,18 +1,24 @@
 'use client'
 
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import {
   Activity, BarChart3, CalendarDays, ChevronDown, ClipboardList, CreditCard, Droplets, Gauge, LayoutDashboard,
-  LogOut, Menu, MessageCircle, Package, Settings, ShieldCheck, ShoppingBag, Users, Wrench, X,
+  LogOut, Menu, MessageCircle, Moon, Package, Settings, ShieldCheck, ShoppingBag, Sun, Users, Wrench, X,
 } from 'lucide-react'
 import Workspace, { type ViewKey } from '@/components/workspace'
+import HelpChat from '@/components/help-chat'
 import { getSupabaseClient } from '@/lib/supabase'
 
 type Tenant = {
   id: string
   name: string
   slug: string
+  owner_name: string
+  updated_at: string
   city: string | null
+  business_phone: string | null
+  business_email: string | null
+  address: string | null
   gstin: string | null
   upi_id: string | null
   custom_domain: string | null
@@ -36,35 +42,91 @@ const navigation: { name: ViewKey; icon: typeof LayoutDashboard }[] = [
   { name: 'Business Settings', icon: Settings },
 ]
 
+const savedPageKey = 'amc-desk:last-page'
+const savedTenantKey = 'amc-desk:last-tenant'
+const savedThemeKey = 'amc-desk:theme'
+
+function isViewKey(value: string | null): value is ViewKey {
+  return navigation.some(({ name }) => name === value)
+}
+
+function initialPage(): ViewKey {
+  if (typeof window === 'undefined') return 'Dashboard'
+  const savedPage = window.sessionStorage.getItem(savedPageKey)
+  return isViewKey(savedPage) ? savedPage : 'Dashboard'
+}
+
+function initialTheme(): 'light' | 'dark' {
+  if (typeof window === 'undefined') return 'light'
+  return window.sessionStorage.getItem(savedThemeKey) === 'dark' ? 'dark' : 'light'
+}
+
+function clearSavedWorkspace() {
+  window.sessionStorage.removeItem(savedPageKey)
+  window.sessionStorage.removeItem(savedTenantKey)
+  window.sessionStorage.removeItem(savedThemeKey)
+  for (let index = window.sessionStorage.length - 1; index >= 0; index -= 1) {
+    const key = window.sessionStorage.key(index)
+    if (key?.startsWith('amc-desk:snapshot:')) window.sessionStorage.removeItem(key)
+  }
+}
+
 export default function AppShell() {
   const supabase = getSupabaseClient()
   const [sessionReady, setSessionReady] = useState(!supabase)
+  const [sessionError, setSessionError] = useState('')
   const [userEmail, setUserEmail] = useState<string | null>(null)
   const [tenants, setTenants] = useState<Tenant[]>([])
   const [tenantRoles, setTenantRoles] = useState<Record<string, string>>({})
   const [tenantId, setTenantId] = useState('')
+  const [membershipRefresh, setMembershipRefresh] = useState(0)
   const [tenantLoading, setTenantLoading] = useState(true)
   const [tenantError, setTenantError] = useState('')
-  const [page, setPage] = useState<ViewKey>('Dashboard')
+  const [page, setPage] = useState<ViewKey>(initialPage)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [notice, setNotice] = useState('')
+  const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme)
+  const updateTenant = useCallback((updatedTenant: Tenant) => {
+    setTenants((current) => current.map((tenant) => tenant.id === updatedTenant.id ? updatedTenant : tenant))
+  }, [])
+  const navigateTo = useCallback((nextPage: ViewKey) => {
+    setPage(nextPage)
+    window.sessionStorage.setItem(savedPageKey, nextPage)
+  }, [])
+  const selectTenant = useCallback((nextTenantId: string) => {
+    setTenantId(nextTenantId)
+    window.sessionStorage.setItem(savedTenantKey, nextTenantId)
+  }, [])
 
   useEffect(() => {
     if (!supabase) return
 
     supabase.auth.getSession().then(({ data, error }) => {
-      if (error) setNotice(error.message)
+      if (error) {
+        setSessionError(error.message)
+        setSessionReady(true)
+        return
+      }
       setUserEmail(data.session?.user.email ?? null)
+      setSessionReady(true)
+    }).catch((error: unknown) => {
+      setSessionError(error instanceof Error ? error.message : 'Could not restore your sign-in session.')
       setSessionReady(true)
     })
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'TOKEN_REFRESHED') return
+      if (event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') return
+      if (event === 'SIGNED_OUT') {
+        clearSavedWorkspace()
+        setPage('Dashboard')
+        setTheme('light')
+      }
       setUserEmail(session?.user.email ?? null)
       setTenants([])
       setTenantRoles({})
       setTenantId('')
       setTenantError('')
       setTenantLoading(true)
+      setMembershipRefresh((current) => current + 1)
     })
 
     return () => subscription.unsubscribe()
@@ -73,10 +135,10 @@ export default function AppShell() {
   useEffect(() => {
     if (!supabase || !userEmail) return
     let active = true
-    supabase
+    void Promise.resolve(supabase
       .from('tenant_memberships')
-      .select('role, tenant:tenants!inner(id, name, slug, city, gstin, upi_id, custom_domain)')
-      .order('created_at', { ascending: true })
+      .select('role, tenant:tenants!inner(id, name, slug, owner_name, updated_at, city, business_phone, business_email, address, gstin, upi_id, custom_domain)')
+      .order('created_at', { ascending: true }))
       .then(({ data, error }) => {
         if (!active) return
         if (error) {
@@ -85,22 +147,38 @@ export default function AppShell() {
           const memberships = (data ?? []) as unknown as MembershipRow[]
           const available = memberships.map((membership) => membership.tenant)
           const roles = Object.fromEntries(memberships.map((membership) => [membership.tenant.id, membership.role]))
+          const savedTenant = window.sessionStorage.getItem(savedTenantKey)
           setTenants(available)
           setTenantRoles(roles)
-          setTenantId(available[0]?.id ?? '')
+          selectTenant(available.find((tenant) => tenant.id === savedTenant)?.id ?? available[0]?.id ?? '')
         }
-        setTenantLoading(false)
+      })
+      .catch((error: unknown) => {
+        if (active) setTenantError(error instanceof Error ? error.message : 'Could not load your workspaces.')
+      })
+      .finally(() => {
+        if (active) setTenantLoading(false)
       })
 
     return () => { active = false }
-  }, [supabase, userEmail])
+  }, [membershipRefresh, selectTenant, supabase, userEmail])
 
   const selectedTenant = tenants.find((tenant) => tenant.id === tenantId)
 
   async function signOut() {
     if (!supabase) return
-    const { error } = await supabase.auth.signOut()
-    if (error) setNotice(error.message)
+    try {
+      const { error } = await supabase.auth.signOut()
+      if (error) {
+        setNotice(error.message)
+      } else {
+        clearSavedWorkspace()
+        setPage('Dashboard')
+        setTheme('light')
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not sign out.')
+    }
   }
 
   if (!supabase) {
@@ -109,6 +187,10 @@ export default function AppShell() {
 
   if (!sessionReady) {
     return <div className="auth-screen"><div className="panel auth-card">Connecting to Supabase…</div></div>
+  }
+
+  if (sessionError) {
+    return <div className="auth-screen"><div className="panel auth-card"><h1>Session unavailable</h1><p>{sessionError}</p><button className="button primary" onClick={() => window.location.reload()}>Try again</button></div></div>
   }
 
   if (!userEmail) {
@@ -124,7 +206,7 @@ export default function AppShell() {
   }
 
   if (!selectedTenant) {
-    return <CreateWorkspace onCreated={(tenant) => { setTenants([tenant]); setTenantRoles({ [tenant.id]: 'owner' }); setTenantId(tenant.id) }} onSignOut={signOut} />
+    return <CreateWorkspace onCreated={(tenant) => { setTenants([tenant]); setTenantRoles({ [tenant.id]: 'owner' }); selectTenant(tenant.id) }} onSignOut={signOut} />
   }
 
   const toast = (message: string) => {
@@ -132,7 +214,13 @@ export default function AppShell() {
     window.setTimeout(() => setNotice(''), 3500)
   }
 
-  return <div className="app-shell" data-theme="light">
+  const toggleTheme = () => {
+    const nextTheme = theme === 'light' ? 'dark' : 'light'
+    setTheme(nextTheme)
+    window.sessionStorage.setItem(savedThemeKey, nextTheme)
+  }
+
+  return <div className="app-shell" data-theme={theme}>
     {sidebarOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar ${sidebarOpen ? 'mobile-open' : ''}`}>
       <div className="brand-row"><div className="brand-symbol"><Droplets size={18} /></div><div className="brand-name">AMC Desk</div><button className="mobile-close icon-button" onClick={() => setSidebarOpen(false)}><X size={17} /></button></div>
@@ -141,11 +229,11 @@ export default function AppShell() {
         <div className="workspace-logo">{selectedTenant.name.slice(0, 2).toUpperCase()}</div>
         <span className="workspace-copy"><strong>{selectedTenant.name}</strong><small>{selectedTenant.city || 'Workspace'}</small></span>
         <ChevronDown size={14} />
-        <select aria-label="Switch workspace" value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
+        <select aria-label="Switch workspace" value={tenantId} onChange={(event) => selectTenant(event.target.value)}>
           {tenants.map((tenant) => <option value={tenant.id} key={tenant.id}>{tenant.name}</option>)}
         </select>
       </label>
-      <nav className="sidebar-nav">{navigation.map(({ name, icon: Icon }) => <button key={name} className={`nav-item ${page === name ? 'active' : ''}`} onClick={() => { setPage(name); setSidebarOpen(false) }}><Icon size={17} /><span>{name}</span></button>)}</nav>
+      <nav className="sidebar-nav">{navigation.map(({ name, icon: Icon }) => <button key={name} className={`nav-item ${page === name ? 'active' : ''}`} onClick={() => { navigateTo(name); setSidebarOpen(false) }}><Icon size={17} /><span>{name}</span></button>)}</nav>
       <div className="sidebar-bottom">
         <div className="sidebar-footer"><span>{userEmail}</span></div>
         <button className="logout-sidebar" onClick={signOut}><LogOut size={16} /> Sign out</button>
@@ -153,12 +241,13 @@ export default function AppShell() {
     </aside>
     <main className="main-shell">
       <header className="topbar">
-        <div className="topbar-left"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>{selectedTenant.name}</span><strong>{page}</strong></div></div>
-        <div className="topbar-tools"><span className="sync-pill">Supabase connected</span><button className="button header-book" onClick={() => setPage('Services & Jobs')}><CalendarDays size={14} /> Services</button><button className="button primary header-add" onClick={() => setPage('Customers 360')}><Users size={15} /> Customers</button><button className="header-logout" onClick={signOut} aria-label="Sign out"><LogOut size={16} /></button></div>
+        <div className="topbar-left"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button><span className="topbar-brand"><Droplets size={17} /><strong>AMC Desk</strong></span><div className="breadcrumb"><span>{selectedTenant.name}</span><strong>{page}</strong></div></div>
+        <div className="topbar-tools"><button className="theme-toggle" type="button" onClick={toggleTheme} aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`} title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}>{theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}<span>{theme === 'light' ? 'Dark mode' : 'Light mode'}</span></button><span className="sync-pill" title="Supabase connected"><i className="online-dot" /><span>Supabase connected</span></span><button className="button header-book" onClick={() => navigateTo('Services & Jobs')}><CalendarDays size={14} /> Services</button><button className="button primary header-add" onClick={() => navigateTo('Customers 360')}><Users size={15} /> Customers</button><button className="header-logout" onClick={signOut} aria-label="Sign out"><LogOut size={16} /></button></div>
       </header>
-      <div className="workspace"><Workspace key={`${selectedTenant.id}-${page}`} page={page} tenantId={selectedTenant.id} role={tenantRoles[selectedTenant.id]} tenant={selectedTenant} onToast={toast} onNavigate={setPage} /></div>
+      <div className="workspace"><Workspace key={`${selectedTenant.id}-${page}`} page={page} tenantId={selectedTenant.id} role={tenantRoles[selectedTenant.id]} theme={theme} tenant={selectedTenant} onToast={toast} onNavigate={navigateTo} onTenantUpdated={updateTenant} /></div>
       <footer className="app-footer"><span>AMC Desk · {selectedTenant.name}</span><span>{userEmail}</span></footer>
     </main>
+    <HelpChat />
     {notice && <div className="toast">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
   </div>
 }
@@ -183,16 +272,21 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (email: string) => v
     setBusy(true)
     setError('')
     setMessage('')
-    const result = mode === 'sign-in'
-      ? await supabase.auth.signInWithPassword({ email, password })
-      : await supabase.auth.signUp({ email, password, options: { data: { business_name: business } } })
-    setBusy(false)
-    if (result.error) {
-      setError(result.error.message)
-    } else if (result.data.session) {
-      onAuthenticated(result.data.session.user.email ?? email)
-    } else {
-      setMessage('Check your email to confirm your account, then sign in.')
+    try {
+      const result = mode === 'sign-in'
+        ? await supabase.auth.signInWithPassword({ email, password })
+        : await supabase.auth.signUp({ email, password, options: { data: { business_name: business } } })
+      if (result.error) {
+        setError(result.error.message)
+      } else if (result.data.session) {
+        onAuthenticated(result.data.session.user.email ?? email)
+      } else {
+        setMessage('Check your email to confirm your account, then sign in.')
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not contact Supabase. Check your connection and try again.')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -221,57 +315,65 @@ function CreateWorkspace({ onCreated, onSignOut }: { onCreated: (tenant: Tenant)
     if (!supabase) return
     setBusy(true)
     setError('')
-    const sessionResult = await supabase.auth.getSession()
-    if (!sessionResult.data.session) {
+    try {
+      const sessionResult = await supabase.auth.getSession()
+      if (sessionResult.error) {
+        setError(sessionResult.error.message)
+        return
+      }
+      if (!sessionResult.data.session) {
+        setError('Please sign in again. Your Supabase session is missing.')
+        return
+      }
+      const userResult = await supabase.auth.getUser()
+      if (userResult.error) {
+        setError(userResult.error.message)
+        return
+      }
+      const user = userResult.data.user
+      if (!user) {
+        setError('Authentication is required')
+        return
+      }
+
+      const baseSlug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'workspace'
+      const tenantId = crypto.randomUUID()
+      const slug = `${baseSlug}-${tenantId.slice(0, 8)}`
+      const { data: tenant, error: resultError } = await supabase
+        .from('tenants')
+        .insert({
+          id: tenantId,
+          name: name.trim(),
+          owner_name: user.email?.split('@')[0] || 'Owner',
+          city: city.trim(),
+          slug,
+        })
+        .select('id, name, slug, owner_name, updated_at, city, business_phone, business_email, address, gstin, upi_id, custom_domain')
+        .single()
+
+      if (resultError || !tenant) {
+        setError(
+          resultError
+            ? `${resultError.message}${resultError.code ? ` [${resultError.code}]` : ''}`
+            : 'Could not create workspace',
+        )
+        return
+      }
+
+      const { error: membershipError } = await supabase
+        .from('tenant_memberships')
+        .insert({ tenant_id: tenantId, user_id: user.id, role: 'owner' })
+
+      if (membershipError) {
+        setError(`${membershipError.message}${membershipError.code ? ` [${membershipError.code}]` : ''}`)
+        return
+      }
+      onCreated(tenant)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not create the workspace. Check your connection and try again.')
+    } finally {
       setBusy(false)
-      setError('Please sign in again. Your Supabase session is missing.')
-      return
     }
-    const userResult = await supabase.auth.getUser()
-    const user = userResult.data.user
-    if (!user) {
-      setBusy(false)
-      setError('Authentication is required')
-      return
-    }
-
-    const baseSlug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'workspace'
-    const tenantId = crypto.randomUUID()
-    const slug = `${baseSlug}-${tenantId.slice(0, 8)}`
-    const { data: tenant, error: resultError } = await supabase
-      .from('tenants')
-      .insert({
-        id: tenantId,
-        name: name.trim(),
-        owner_name: user.email?.split('@')[0] || 'Owner',
-        city: city.trim(),
-        slug,
-      })
-      .select('id, name, slug, city, gstin, upi_id, custom_domain')
-      .single()
-
-    if (resultError || !tenant) {
-      setBusy(false)
-      setError(
-        resultError
-          ? `${resultError.message}${resultError.code ? ` [${resultError.code}]` : ''}`
-          : 'Could not create workspace',
-      )
-      return
-    }
-
-    const { error: membershipError } = await supabase
-      .from('tenant_memberships')
-      .insert({ tenant_id: tenantId, user_id: user.id, role: 'owner' })
-
-    setBusy(false)
-    if (membershipError) {
-      setError(
-        `${membershipError.message}${membershipError.code ? ` [${membershipError.code}]` : ''}`,
-      )
-      return
-    }
-    onCreated(tenant)
   }
 
   return <div className="auth-screen"><form className="panel auth-card" onSubmit={submit}><div className="brand-symbol"><Droplets size={18} /></div><h1>Create a workspace</h1><p>Your account is authenticated, but it does not have a dealer workspace yet.</p><label className="field-label">BUSINESS NAME<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">CITY<input value={city} onChange={(event) => setCity(event.target.value)} /></label>{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary full-button" disabled={busy}>{busy ? 'Creating…' : 'Create workspace'}</button><button type="button" className="text-button auth-switch" onClick={onSignOut}>Sign out</button></form></div>

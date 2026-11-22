@@ -8,6 +8,9 @@ create table if not exists public.tenants (
   name text not null,
   owner_name text not null,
   city text not null default '',
+  business_phone text,
+  business_email text,
+  address text,
   custom_domain text unique,
   slug text not null unique,
   logo_url text,
@@ -17,6 +20,11 @@ create table if not exists public.tenants (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.tenants
+  add column if not exists business_phone text,
+  add column if not exists business_email text,
+  add column if not exists address text;
 
 create table if not exists public.tenant_memberships (
   tenant_id uuid not null references public.tenants(id) on delete cascade,

@@ -4,16 +4,98 @@ import { useEffect, useRef, useState } from 'react'
 import type { ECharts, EChartsOption } from 'echarts'
 import { money } from '@/lib/supabase'
 
-export type ReportChartType = 'bar' | 'line' | 'pie' | 'donut' | 'bar3d' | 'line3d'
+export type ReportChartType = 'bar' | 'line' | 'pie' | 'donut' | 'pie3d' | 'bar3d' | 'line3d'
 
 type Props = {
   categories: string[]
   values: number[]
   chartType: ReportChartType
   valueKind: 'count' | 'currency'
+  theme: 'light' | 'dark'
 }
 
-export default function ReportChart({ categories, values, chartType, valueKind }: Props) {
+const pieColors = ['#2563eb', '#14b8a6', '#f59e0b', '#8b5cf6', '#ef4444', '#0ea5e9', '#84cc16', '#f97316', '#ec4899', '#64748b', '#a855f7', '#22c55e']
+
+function buildPie3dSeries(categories: string[], values: number[], formatValue: (value: number) => string) {
+  const activeSlices = categories
+    .map((name, index) => ({ name, value: values[index] ?? 0 }))
+    .filter((slice) => slice.value > 0)
+  const total = activeSlices.reduce((sum, slice) => sum + slice.value, 0)
+  const height = 0.22
+  let startAngle = -Math.PI / 2
+  const series: object[] = []
+
+  function addSurface(
+    name: string,
+    color: string,
+    u: { min: number; max: number; step: number },
+    v: { min: number; max: number; step: number },
+    x: (u: number, v: number) => number,
+    y: (u: number, v: number) => number,
+    z: (u: number, v: number) => number,
+  ) {
+    series.push({
+      type: 'surface',
+      name,
+      parametric: true,
+      parametricEquation: { u, v, x, y, z },
+      shading: 'lambert',
+      wireframe: { show: false },
+      itemStyle: { color },
+    })
+  }
+
+  activeSlices.forEach((slice, index) => {
+    const endAngle = startAngle + (slice.value / total) * Math.PI * 2
+    const middleAngle = (startAngle + endAngle) / 2
+    const angleStep = (endAngle - startAngle) / Math.max(3, Math.ceil((endAngle - startAngle) / 0.08))
+    const xOffset = Math.cos(middleAngle) * 0.025
+    const yOffset = Math.sin(middleAngle) * 0.025
+    const color = pieColors[index % pieColors.length]
+    const arc = { min: startAngle, max: endAngle, step: angleStep }
+    const radial = { min: 0, max: 1, step: 0.08 }
+    const vertical = { min: 0, max: height, step: height / 4 }
+    const plane = (zValue: number) => ({
+      x: (angle: number, radius: number) => xOffset + radius * Math.cos(angle),
+      y: (angle: number, radius: number) => yOffset + radius * Math.sin(angle),
+      z: () => zValue,
+    })
+
+    const top = plane(height)
+    const bottom = plane(0)
+    addSurface(slice.name, color, arc, radial, top.x, top.y, top.z)
+    addSurface(slice.name, color, arc, radial, bottom.x, bottom.y, bottom.z)
+    addSurface(
+      slice.name,
+      color,
+      arc,
+      vertical,
+      (angle) => xOffset + Math.cos(angle),
+      (angle) => yOffset + Math.sin(angle),
+      (_angle, z) => z,
+    )
+    for (const edgeAngle of [startAngle, endAngle]) {
+      addSurface(
+        slice.name,
+        color,
+        radial,
+        vertical,
+        (radius) => xOffset + radius * Math.cos(edgeAngle),
+        (radius) => yOffset + radius * Math.sin(edgeAngle),
+        (_radius, z) => z,
+      )
+    }
+    startAngle = endAngle
+  })
+
+  return {
+    series,
+    legend: activeSlices.map((slice) => slice.name),
+    valueFor: (name: string) => formatValue(activeSlices.find((slice) => slice.name === name)?.value ?? 0),
+  }
+}
+
+export default function ReportChart({ categories, values, chartType, valueKind, theme }: Props) {
   const chartElement = useRef<HTMLDivElement>(null)
   const [chartFailure, setChartFailure] = useState<{ signature: string; message: string } | null>(null)
   const signature = `${chartType}:${valueKind}:${categories.join('|')}:${values.join('|')}`
@@ -34,8 +116,32 @@ export default function ReportChart({ categories, values, chartType, valueKind }
         const formatValue = (value: number) => valueKind === 'currency'
           ? money(value)
           : value.toLocaleString('en-IN')
+        const textColor = theme === 'dark' ? '#a8b5c7' : '#64748b'
+        const gridColor = theme === 'dark' ? '#263449' : '#edf1f6'
 
-        if (chartType === 'bar3d' || chartType === 'line3d') {
+        if (chartType === 'pie3d') {
+          const pie = buildPie3dSeries(categories, values, formatValue)
+          const option = {
+            animationDuration: 450,
+            tooltip: {
+              trigger: 'item',
+              formatter: (params: { seriesName: string }) => `${params.seriesName}<br />${pie.valueFor(params.seriesName)}`,
+            },
+            legend: { data: pie.legend, bottom: 0, textStyle: { color: textColor } },
+            xAxis3D: { type: 'value', min: -1.35, max: 1.35, show: false },
+            yAxis3D: { type: 'value', min: -1.35, max: 1.35, show: false },
+            zAxis3D: { type: 'value', min: -0.05, max: 0.55, show: false },
+            grid3D: {
+              boxWidth: 100,
+              boxDepth: 100,
+              boxHeight: 34,
+              viewControl: { projection: 'perspective', alpha: 30, beta: 35, distance: 150, autoRotate: false },
+              light: { main: { intensity: 1.15 }, ambient: { intensity: 0.5 } },
+            },
+            series: pie.series,
+          }
+          chart.setOption(option as EChartsOption, { notMerge: true })
+        } else if (chartType === 'bar3d' || chartType === 'line3d') {
           const option = {
             animationDuration: 450,
             tooltip: {
@@ -44,9 +150,9 @@ export default function ReportChart({ categories, values, chartType, valueKind }
                 return `${categories[index] ?? ''}<br />${formatValue(value ?? 0)}`
               },
             },
-            xAxis3D: { type: 'category', data: categories, axisLabel: { color: '#64748b' } },
-            yAxis3D: { type: 'category', data: [''], axisLabel: { color: '#64748b' } },
-            zAxis3D: { type: 'value', name: valueKind === 'currency' ? 'INR' : 'Count', axisLabel: { color: '#64748b' } },
+            xAxis3D: { type: 'category', data: categories, axisLabel: { color: textColor } },
+            yAxis3D: { type: 'category', data: [''], axisLabel: { color: textColor } },
+            zAxis3D: { type: 'value', name: valueKind === 'currency' ? 'INR' : 'Count', axisLabel: { color: textColor } },
             grid3D: {
               boxWidth: 150,
               boxDepth: 36,
@@ -75,23 +181,23 @@ export default function ReportChart({ categories, values, chartType, valueKind }
               type: 'category',
               data: categories,
               axisTick: { show: false },
-              axisLine: { lineStyle: { color: '#dce4ef' } },
-              axisLabel: { color: '#64748b', rotate: categories.length > 8 ? 25 : 0 },
+              axisLine: { lineStyle: { color: gridColor } },
+              axisLabel: { color: textColor, rotate: categories.length > 8 ? 25 : 0 },
             },
             yAxis: isPieChart ? undefined : {
               type: 'value',
-              axisLabel: { color: '#64748b', formatter: (value: number) => valueKind === 'currency' ? money(value) : value.toLocaleString('en-IN') },
-              splitLine: { lineStyle: { color: '#edf1f6' } },
+              axisLabel: { color: textColor, formatter: (value: number) => valueKind === 'currency' ? money(value) : value.toLocaleString('en-IN') },
+              splitLine: { lineStyle: { color: gridColor } },
             },
-            legend: isPieChart ? { bottom: 0, textStyle: { color: '#64748b' } } : undefined,
+            legend: isPieChart ? { bottom: 0, textStyle: { color: textColor } } : undefined,
             series: isPieChart
               ? [{
                 type: 'pie',
                 radius: chartType === 'donut' ? ['48%', '72%'] : '72%',
                 center: ['50%', '45%'],
                 avoidLabelOverlap: true,
-                itemStyle: { borderColor: '#fff', borderWidth: 3 },
-                label: { color: '#475569', formatter: '{b}: {c}' },
+                itemStyle: { borderColor: theme === 'dark' ? '#111827' : '#fff', borderWidth: 3 },
+                label: { color: textColor, formatter: '{b}: {c}' },
                 data: categories.map((name, index) => ({ name, value: values[index] })),
               }]
               : [{
@@ -124,7 +230,7 @@ export default function ReportChart({ categories, values, chartType, valueKind }
       if (resize) window.removeEventListener('resize', resize)
       chart?.dispose()
     }
-  }, [categories, chartType, signature, valueKind, values])
+  }, [categories, chartType, signature, theme, valueKind, values])
 
   return <div className="report-chart-shell">
     {chartError ? <p className="report-chart-error" role="alert">{chartError}</p> : <div className="report-chart" ref={chartElement} role="img" aria-label={`${chartType} chart showing ${valueKind} by category`} />}

@@ -5,7 +5,7 @@ AMC Desk is a multi-tenant service-operations app built with Next.js, Supabase A
 ## Run locally
 
 1. Create a Supabase project.
-2. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql). Rerun this file after schema updates; it replaces the workspace RLS policies.
+2. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql). Rerun this file after schema updates; it adds business contact fields and replaces the workspace RLS policies.
    If workspace creation still reports an RLS violation, run [`supabase/fix-workspace-rls.sql`](./supabase/fix-workspace-rls.sql) separately. It removes every old tenant/membership policy by name and recreates only the authenticated workspace policies.
 3. Copy `.env.example` to `.env.local` and set your Supabase project URL and publishable key:
 
@@ -31,6 +31,7 @@ After signing up, create a workspace directly from the app. A user can access ad
 - Customer, purifier, technician, service job, AMC, inventory, invoice, catalog, WhatsApp message, notification-rule, inventory transaction, and service-reading tables.
 - Direct table operations for workspace creation, membership assignment, customer creation, job booking, status updates, and dashboard totals.
 - Tenant-first indexes and paginated customer/job tables in the UI.
+- The selected workspace, page, and color theme persist across refreshes in the current browser tab. Dashboard and report summaries use a short-lived session cache with background refresh; customer and service records are not cached in browser storage.
 
 The UI supports creating customers, service jobs, AMC contracts, technicians, stock items, catalog items, invoices, and notification rules, plus service-job status updates. Reports can graph customer growth, job volume/status, AMC contract end dates, and paid revenue as interactive 2D bar, line, pie, and donut charts, plus 3D columns and trends.
 
