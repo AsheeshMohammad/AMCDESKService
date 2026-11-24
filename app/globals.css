@@ -1374,6 +1374,10 @@ td small { display: block; margin-top: 4px; color: #718198; font-size: 9px; }
 .settings-editor { padding: 22px; }
 .settings-editor-heading h2 { margin: 0; color: #172033; font-size: 16px; }
 .settings-editor-heading p { margin: 5px 0 0; color: #64748b; font-size: 11px; }
+.workspace-url { display: flex; flex-direction: column; gap: 5px; margin: 15px 0 0; padding: 12px; background: #f8fafc; border: 1px solid #e6ebf2; border-radius: 7px; }
+.workspace-url strong { color: #64748b; font-size: 9px; letter-spacing: .5px; }
+.workspace-url a { width: fit-content; color: #2563eb; font-size: 12px; font-weight: 600; }
+.workspace-url a:hover { text-decoration: underline; }
 .settings-form { margin-top: 20px; }
 .settings-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
 .settings-fields .field-label { display: flex; min-width: 0; flex-direction: column; gap: 7px; color: #64748b; font-size: 9px; font-weight: 650; letter-spacing: .4px; }
@@ -1387,6 +1391,8 @@ td small { display: block; margin-top: 4px; color: #718198; font-size: 9px; }
 .app-shell[data-theme="dark"] .settings-editor-heading p,
 .app-shell[data-theme="dark"] .settings-fields .field-label,
 .app-shell[data-theme="dark"] .settings-permission-note { color: #94a3b8; }
+.app-shell[data-theme="dark"] .workspace-url { background: #111b2b; border-color: #263247; }
+.app-shell[data-theme="dark"] .workspace-url strong { color: #94a3b8; }
 .app-shell[data-theme="dark"] .settings-fields input { color: #e2e8f0; background: #111827; border-color: #334155; }
 .app-shell[data-theme="dark"] .settings-fields input:focus { border-color: #6b9cff; }
 .app-shell[data-theme="dark"] .settings-editor-actions { border-color: #263247; }

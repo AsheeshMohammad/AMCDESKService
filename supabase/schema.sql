@@ -1,5 +1,5 @@
 -- AMC Desk direct-table Supabase schema.
--- This file creates no demo records and contains no stored procedures.
+-- This file creates no demo records and includes an authenticated tenant-registration function.
 
 create extension if not exists pgcrypto;
 
@@ -33,6 +33,60 @@ create table if not exists public.tenant_memberships (
   created_at timestamptz not null default now(),
   primary key (tenant_id, user_id)
 );
+
+create or replace function public.create_tenant(p_name text, p_owner_name text, p_city text default '')
+returns public.tenants
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  actor_id uuid := auth.uid();
+  base_slug text;
+  candidate_slug text;
+  created_tenant public.tenants;
+begin
+  if actor_id is null then
+    raise exception using errcode = '42501', message = 'Authentication is required to register a company.';
+  end if;
+  if nullif(btrim(p_name), '') is null or nullif(btrim(p_owner_name), '') is null then
+    raise exception using errcode = '22023', message = 'Company name and admin name are required.';
+  end if;
+  if length(btrim(p_name)) > 160 or length(btrim(p_owner_name)) > 160 or length(coalesce(p_city, '')) > 120 then
+    raise exception using errcode = '22023', message = 'Company, admin, or city details exceed their allowed length.';
+  end if;
+
+  base_slug := trim(both '-' from regexp_replace(lower(btrim(p_name)), '[^a-z0-9]+', '-', 'g'));
+  if base_slug = '' then
+    base_slug := 'company';
+  end if;
+
+  loop
+    candidate_slug := left(base_slug, 40) || '-' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 12);
+    begin
+      insert into public.tenants (name, owner_name, city, business_email, slug)
+      values (
+        btrim(p_name),
+        btrim(p_owner_name),
+        coalesce(btrim(p_city), ''),
+        auth.jwt() ->> 'email',
+        candidate_slug
+      )
+      returning * into created_tenant;
+      exit;
+    exception when unique_violation then
+      if not exists (select 1 from public.tenants where slug = candidate_slug) then
+        raise;
+      end if;
+    end;
+  end loop;
+
+  insert into public.tenant_memberships (tenant_id, user_id, role)
+  values (created_tenant.id, actor_id, 'owner');
+
+  return created_tenant;
+end;
+$$;
 
 create table if not exists public.customers (
   id uuid primary key default gen_random_uuid(),
@@ -306,11 +360,6 @@ create policy tenant_read on public.tenants
     where m.tenant_id = tenants.id and m.user_id = auth.uid()
   ));
 
-drop policy if exists tenant_create on public.tenants;
-create policy tenant_create on public.tenants
-  for insert to public
-  with check ((select auth.uid()) is not null);
-
 drop policy if exists tenant_update on public.tenants;
 create policy tenant_update on public.tenants
   for update to authenticated
@@ -331,11 +380,6 @@ drop policy if exists membership_read on public.tenant_memberships;
 create policy membership_read on public.tenant_memberships
   for select to authenticated
   using (user_id = auth.uid());
-
-drop policy if exists membership_create on public.tenant_memberships;
-create policy membership_create on public.tenant_memberships
-  for insert to public
-  with check (user_id = auth.uid());
 
 drop policy if exists membership_manage on public.tenant_memberships;
 create policy membership_manage on public.tenant_memberships
@@ -474,5 +518,9 @@ begin
 end
 $$;
 
-grant select, insert, update, delete on public.tenants to authenticated;
-grant select, insert, update, delete on public.tenant_memberships to authenticated;
+revoke insert on public.tenants, public.tenant_memberships from anon, authenticated;
+revoke all on function public.create_tenant(text, text, text) from public, anon;
+grant execute on function public.create_tenant(text, text, text) to authenticated;
+
+grant select, update, delete on public.tenants to authenticated;
+grant select, update, delete on public.tenant_memberships to authenticated;

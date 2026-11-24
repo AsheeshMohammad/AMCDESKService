@@ -885,6 +885,7 @@ function SettingsCard({
 
   return <section className="panel settings-panel settings-editor">
     <div className="settings-editor-heading"><div><h2>Business profile</h2><p>These details identify your business in AMC Desk.</p></div></div>
+    <div className="workspace-url"><strong>COMPANY WORKSPACE URL</strong><a href={`https://${tenant.slug}.amcdesk.com`} target="_blank" rel="noreferrer">{tenant.slug}.amcdesk.com</a></div>
     <form className="settings-form" onSubmit={saveProfile}>
       <div className="settings-fields">
         <label className="field-label">BUSINESS NAME<input required maxLength={160} value={profile.name} onChange={(event) => updateField('name', event.target.value)} disabled={!canManage} /></label>

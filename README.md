@@ -5,8 +5,7 @@ AMC Desk is a multi-tenant service-operations app built with Next.js, Supabase A
 ## Run locally
 
 1. Create a Supabase project.
-2. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql). Rerun this file after schema updates; it adds business contact fields and replaces the workspace RLS policies.
-   If workspace creation still reports an RLS violation, run [`supabase/fix-workspace-rls.sql`](./supabase/fix-workspace-rls.sql) separately. It removes every old tenant/membership policy by name and recreates only the authenticated workspace policies.
+2. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql). Rerun this file after schema updates; it adds business contact fields and replaces the workspace RLS policies. The old `supabase/fix-workspace-rls.sql` helper is retired because it disabled row-level security; it now fails with instructions to use the schema instead.
 3. Copy `.env.example` to `.env.local` and set your Supabase project URL and publishable key:
 
    ```dotenv
@@ -14,7 +13,7 @@ AMC Desk is a multi-tenant service-operations app built with Next.js, Supabase A
    NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
    ```
 
-4. In Supabase Authentication, configure the allowed sign-in methods, email confirmation, and redirect URLs for your local and production app URLs.
+4. In Supabase Authentication, configure the allowed sign-in methods, email confirmation, and redirect URLs for `https://amcdesk.com/**` and `https://*.amcdesk.com/**` (plus local development URLs).
 5. Install and start the app:
 
    ```bash
@@ -22,14 +21,15 @@ AMC Desk is a multi-tenant service-operations app built with Next.js, Supabase A
    npm run dev
    ```
 
-After signing up, create a workspace directly from the app. A user can access additional workspaces only through a membership row.
+From the sign-in screen choose **Register Company**, enter the company and admin details, then finish registration. The database creates a unique company slug and owner membership atomically. The company URL is `https://{slug}.amcdesk.com`; its Supabase session is shared between the platform and company subdomains using Secure, SameSite cookies. Add a wildcard DNS record and configure your hosting provider to route `*.amcdesk.com` to this same app deployment, with wildcard TLS enabled.
 
 ## Backend included
 
-- Tenant and membership tables; membership-based row-level security on operational data.
+- Tenant and membership tables; membership-based row-level security on operational data. Every customer, technician, and operational data query is filtered by `tenant_id` and independently protected by database RLS.
+- Authenticated database function for atomic company/subdomain creation and owner membership assignment; clients cannot directly add themselves to arbitrary tenants.
 - Composite foreign keys that prevent records from referencing another tenant's customer, purifier, technician, or job.
 - Customer, purifier, technician, service job, AMC, inventory, invoice, catalog, WhatsApp message, notification-rule, inventory transaction, and service-reading tables.
-- Direct table operations for workspace creation, membership assignment, customer creation, job booking, status updates, and dashboard totals.
+- Tenant-scoped table operations for customer creation, job booking, status updates, and dashboard totals.
 - Tenant-first indexes and paginated customer/job tables in the UI.
 - The selected workspace, page, and color theme persist across refreshes in the current browser tab. Dashboard and report summaries use a short-lived session cache with background refresh; customer and service records are not cached in browser storage.
 

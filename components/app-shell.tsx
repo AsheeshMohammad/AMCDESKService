@@ -42,12 +42,38 @@ const navigation: { name: ViewKey; icon: typeof LayoutDashboard }[] = [
   { name: 'Business Settings', icon: Settings },
 ]
 
+function isTenant(value: unknown): value is Tenant {
+  if (typeof value !== 'object' || value === null) return false
+  return 'id' in value && typeof value.id === 'string'
+    && 'name' in value && typeof value.name === 'string'
+    && 'slug' in value && typeof value.slug === 'string'
+    && 'owner_name' in value && typeof value.owner_name === 'string'
+    && 'updated_at' in value && typeof value.updated_at === 'string'
+    && 'city' in value && typeof value.city === 'string'
+    && 'business_phone' in value && (typeof value.business_phone === 'string' || value.business_phone === null)
+    && 'business_email' in value && (typeof value.business_email === 'string' || value.business_email === null)
+    && 'address' in value && (typeof value.address === 'string' || value.address === null)
+    && 'gstin' in value && (typeof value.gstin === 'string' || value.gstin === null)
+    && 'upi_id' in value && (typeof value.upi_id === 'string' || value.upi_id === null)
+    && 'custom_domain' in value && (typeof value.custom_domain === 'string' || value.custom_domain === null)
+}
+
 const savedPageKey = 'amc-desk:last-page'
 const savedTenantKey = 'amc-desk:last-tenant'
 const savedThemeKey = 'amc-desk:theme'
+const platformDomain = 'amcdesk.com'
 
 function isViewKey(value: string | null): value is ViewKey {
   return navigation.some(({ name }) => name === value)
+}
+
+function currentPlatformTenantSlug() {
+  if (typeof window === 'undefined') return null
+  const hostname = window.location.hostname.toLowerCase()
+  if (hostname === platformDomain || hostname === `www.${platformDomain}`) return null
+  return hostname.endsWith(`.${platformDomain}`)
+    ? hostname.slice(0, -(platformDomain.length + 1))
+    : null
 }
 
 function initialPage(): ViewKey {
@@ -82,9 +108,11 @@ export default function AppShell() {
   const [membershipRefresh, setMembershipRefresh] = useState(0)
   const [tenantLoading, setTenantLoading] = useState(true)
   const [tenantError, setTenantError] = useState('')
+  const [platformTenantSlug] = useState(currentPlatformTenantSlug)
   const [page, setPage] = useState<ViewKey>(initialPage)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [notice, setNotice] = useState('')
+  const [noticeUrl, setNoticeUrl] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme)
   const updateTenant = useCallback((updatedTenant: Tenant) => {
     setTenants((current) => current.map((tenant) => tenant.id === updatedTenant.id ? updatedTenant : tenant))
@@ -145,8 +173,19 @@ export default function AppShell() {
           setTenantError(error.message)
         } else {
           const memberships = (data ?? []) as unknown as MembershipRow[]
-          const available = memberships.map((membership) => membership.tenant)
-          const roles = Object.fromEntries(memberships.map((membership) => [membership.tenant.id, membership.role]))
+          const platformTenant = platformTenantSlug
+            ? memberships.find((membership) => membership.tenant.slug === platformTenantSlug)
+            : undefined
+          if (platformTenantSlug && !platformTenant) {
+            setTenants([])
+            setTenantRoles({})
+            setTenantId('')
+            setTenantError(`Your account does not have access to ${platformTenantSlug}.${platformDomain}.`)
+            return
+          }
+          const accessibleMemberships = platformTenant ? [platformTenant] : memberships
+          const available = accessibleMemberships.map((membership) => membership.tenant)
+          const roles = Object.fromEntries(accessibleMemberships.map((membership) => [membership.tenant.id, membership.role]))
           const savedTenant = window.sessionStorage.getItem(savedTenantKey)
           setTenants(available)
           setTenantRoles(roles)
@@ -161,7 +200,7 @@ export default function AppShell() {
       })
 
     return () => { active = false }
-  }, [membershipRefresh, selectTenant, supabase, userEmail])
+  }, [membershipRefresh, platformTenantSlug, selectTenant, supabase, userEmail])
 
   const selectedTenant = tenants.find((tenant) => tenant.id === tenantId)
 
@@ -206,11 +245,19 @@ export default function AppShell() {
   }
 
   if (!selectedTenant) {
-    return <CreateWorkspace onCreated={(tenant) => { setTenants([tenant]); setTenantRoles({ [tenant.id]: 'owner' }); selectTenant(tenant.id) }} onSignOut={signOut} />
+    return <CreateWorkspace onCreated={(tenant) => {
+      setTenants([tenant])
+      setTenantRoles({ [tenant.id]: 'owner' })
+      selectTenant(tenant.id)
+      setNotice('Company registered. Your URL:')
+      setNoticeUrl(`https://${tenant.slug}.amcdesk.com`)
+      window.setTimeout(() => { setNotice(''); setNoticeUrl('') }, 8000)
+    }} onSignOut={signOut} />
   }
 
   const toast = (message: string) => {
     setNotice(message)
+    setNoticeUrl('')
     window.setTimeout(() => setNotice(''), 3500)
   }
 
@@ -248,7 +295,7 @@ export default function AppShell() {
       <footer className="app-footer"><span>AMC Desk · {selectedTenant.name}</span><span>{userEmail}</span></footer>
     </main>
     <HelpChat />
-    {notice && <div className="toast">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
+    {notice && <div className="toast">{notice}{noticeUrl && <> <a href={noticeUrl} target="_blank" rel="noreferrer">{noticeUrl.replace('https://', '')}</a></>}<button onClick={() => { setNotice(''); setNoticeUrl('') }} aria-label="Dismiss"><X size={14} /></button></div>}
   </div>
 }
 
@@ -262,6 +309,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (email: string) => v
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [business, setBusiness] = useState('')
+  const [adminName, setAdminName] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
@@ -275,7 +323,11 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (email: string) => v
     try {
       const result = mode === 'sign-in'
         ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password, options: { data: { business_name: business } } })
+        : await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { business_name: business.trim(), admin_name: adminName.trim() } },
+        })
       if (result.error) {
         setError(result.error.message)
       } else if (result.data.session) {
@@ -292,23 +344,45 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (email: string) => v
 
   return <div className="auth-screen"><form className="panel auth-card" onSubmit={submit}>
     <div className="brand-symbol"><Droplets size={18} /></div><div className="eyebrow">AMC DESK</div>
-    <h1>{mode === 'sign-in' ? 'Sign in to your workspace' : 'Create your workspace'}</h1>
+    <h1>{mode === 'sign-in' ? 'Sign in to your workspace' : 'Register your company'}</h1>
     <p>Use your account to securely access your service data.</p>
-    {mode === 'sign-up' && <label className="field-label">BUSINESS NAME<input required value={business} onChange={(event) => setBusiness(event.target.value)} autoComplete="organization" /></label>}
+    {mode === 'sign-up' && <>
+      <label className="field-label">COMPANY NAME<input required maxLength={160} value={business} onChange={(event) => setBusiness(event.target.value)} autoComplete="organization" /></label>
+      <label className="field-label">ADMIN NAME<input required maxLength={160} value={adminName} onChange={(event) => setAdminName(event.target.value)} autoComplete="name" /></label>
+    </>}
     <label className="field-label">EMAIL<input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
     <label className="field-label">PASSWORD<input required type="password" minLength={8} autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} /></label>
     {error && <p className="form-error" role="alert">{error}</p>}{message && <p role="status">{message}</p>}
-    <button className="button primary full-button" disabled={busy}>{busy ? 'Please wait…' : mode === 'sign-in' ? 'Sign in' : 'Create account'}</button>
-    <button type="button" className="text-button auth-switch" onClick={() => { setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in'); setError(''); setMessage('') }}>{mode === 'sign-in' ? 'New to AMC Desk? Create an account' : 'Already registered? Sign in'}</button>
+    <button className="button primary full-button" disabled={busy}>{busy ? 'Please wait…' : mode === 'sign-in' ? 'Sign in' : 'Register company'}</button>
+    <button type="button" className="text-button auth-switch" onClick={() => { setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in'); setError(''); setMessage('') }}>{mode === 'sign-in' ? 'Register Company' : 'Already registered? Sign in'}</button>
   </form></div>
 }
 
 function CreateWorkspace({ onCreated, onSignOut }: { onCreated: (tenant: Tenant) => void; onSignOut: () => void }) {
   const supabase = getSupabaseClient()
   const [name, setName] = useState('')
+  const [ownerName, setOwnerName] = useState('')
   const [city, setCity] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (!supabase) return
+    let active = true
+    void supabase.auth.getUser().then(({ data, error: userError }) => {
+      if (!active) return
+      if (userError) {
+        setError(userError.message)
+        return
+      }
+      const metadata = data.user?.user_metadata
+      if (typeof metadata?.business_name === 'string') setName((current) => current || metadata.business_name)
+      if (typeof metadata?.admin_name === 'string') setOwnerName((current) => current || metadata.admin_name)
+    }).catch((userError: unknown) => {
+      if (active) setError(userError instanceof Error ? userError.message : 'Could not load your registration details.')
+    })
+    return () => { active = false }
+  }, [supabase])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -325,49 +399,23 @@ function CreateWorkspace({ onCreated, onSignOut }: { onCreated: (tenant: Tenant)
         setError('Please sign in again. Your Supabase session is missing.')
         return
       }
-      const userResult = await supabase.auth.getUser()
-      if (userResult.error) {
-        setError(userResult.error.message)
-        return
-      }
-      const user = userResult.data.user
-      if (!user) {
-        setError('Authentication is required')
-        return
-      }
-
-      const baseSlug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'workspace'
-      const tenantId = crypto.randomUUID()
-      const slug = `${baseSlug}-${tenantId.slice(0, 8)}`
       const { data: tenant, error: resultError } = await supabase
-        .from('tenants')
-        .insert({
-          id: tenantId,
-          name: name.trim(),
-          owner_name: user.email?.split('@')[0] || 'Owner',
-          city: city.trim(),
-          slug,
+        .rpc('create_tenant', {
+          p_name: name.trim(),
+          p_owner_name: ownerName.trim(),
+          p_city: city.trim(),
         })
-        .select('id, name, slug, owner_name, updated_at, city, business_phone, business_email, address, gstin, upi_id, custom_domain')
         .single()
 
-      if (resultError || !tenant) {
+      if (resultError || !isTenant(tenant)) {
         setError(
           resultError
             ? `${resultError.message}${resultError.code ? ` [${resultError.code}]` : ''}`
-            : 'Could not create workspace',
+            : 'Company registration returned an invalid workspace record.',
         )
         return
       }
 
-      const { error: membershipError } = await supabase
-        .from('tenant_memberships')
-        .insert({ tenant_id: tenantId, user_id: user.id, role: 'owner' })
-
-      if (membershipError) {
-        setError(`${membershipError.message}${membershipError.code ? ` [${membershipError.code}]` : ''}`)
-        return
-      }
       onCreated(tenant)
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Could not create the workspace. Check your connection and try again.')
@@ -376,5 +424,5 @@ function CreateWorkspace({ onCreated, onSignOut }: { onCreated: (tenant: Tenant)
     }
   }
 
-  return <div className="auth-screen"><form className="panel auth-card" onSubmit={submit}><div className="brand-symbol"><Droplets size={18} /></div><h1>Create a workspace</h1><p>Your account is authenticated, but it does not have a dealer workspace yet.</p><label className="field-label">BUSINESS NAME<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">CITY<input value={city} onChange={(event) => setCity(event.target.value)} /></label>{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary full-button" disabled={busy}>{busy ? 'Creating…' : 'Create workspace'}</button><button type="button" className="text-button auth-switch" onClick={onSignOut}>Sign out</button></form></div>
+  return <div className="auth-screen"><form className="panel auth-card" onSubmit={submit}><div className="brand-symbol"><Droplets size={18} /></div><h1>Finish company registration</h1><p>Your company workspace and admin access will be created together.</p><label className="field-label">COMPANY NAME<input required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">ADMIN NAME<input required maxLength={160} value={ownerName} onChange={(event) => setOwnerName(event.target.value)} /></label><label className="field-label">CITY<input maxLength={120} value={city} onChange={(event) => setCity(event.target.value)} /></label>{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary full-button" disabled={busy}>{busy ? 'Registering…' : 'Register company'}</button><button type="button" className="text-button auth-switch" onClick={onSignOut}>Sign out</button></form></div>
 }
